@@ -73,7 +73,7 @@ export default function SessionChat({ sessionId, isActive, onSessionDead }: Sess
       sendMessage({ text: text.trim(), metadata: { createdAt: new Date().toISOString() } });
 
       // Auto-title the session from the first user message
-      const isFirstMessage = messages.filter((m) => m.role === 'user').length <= 1;
+      const isFirstMessage = messages.filter((m) => m.role === 'user').length === 0;
       if (isFirstMessage) {
         apiFetch('/api/title', {
           method: 'POST',
