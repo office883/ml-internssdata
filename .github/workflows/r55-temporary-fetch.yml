@@ -1,0 +1,33 @@
+name: R55 temporary public-data fetch
+
+on:
+  pull_request:
+    paths:
+      - '.r55-trigger/**'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-r45-catalog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify complete R(4,5,24) catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 5 \
+            -o r45_24.g6 \
+            'https://media.githubusercontent.com/media/LinXueyuanStdio/RamseyGraph/refs/heads/main/data/r45_24.g6'
+          echo '83ca4028f206b2fa4315ef219b8c2c57c7835209673dd8183d8fb4353bd4fdd0  r45_24.g6' | sha256sum -c -
+          test "$(wc -l < r45_24.g6)" -eq 352366
+          sha256sum r45_24.g6 > r45_24.g6.sha256
+      - name: Upload verified catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: r45-24-complete-catalog
+          path: |
+            r45_24.g6
+            r45_24.g6.sha256
+          compression-level: 0
+          retention-days: 1
