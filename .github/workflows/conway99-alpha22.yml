@@ -1,0 +1,98 @@
+name: Conway 99 alpha-22 branch
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-instance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install --user 'python-sat>=1.8.dev13'
+      - name: Generate exact CNF
+        run: |
+          mkdir -p results
+          python3 scratch/conway99/alpha22_cnf.py --out results/alpha22.cnf | tee results/meta.json
+          sha256sum results/alpha22.cnf | tee results/CNF.sha256
+          head -1 results/alpha22.cnf | tee results/header.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conway99-alpha22-cnf
+          path: results/
+          compression-level: 6
+          retention-days: 30
+
+  kissat:
+    needs: build-instance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 115
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Kissat 4.0.4
+        run: |
+          git clone --depth 1 --branch rel-4.0.4 https://github.com/arminbiere/kissat.git /tmp/kissat
+          cd /tmp/kissat && ./configure && make -j2
+      - run: python3 -m pip install --user 'python-sat>=1.8.dev13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: conway99-alpha22-cnf
+          path: results
+      - name: Solve
+        shell: bash
+        run: |
+          set +e
+          /usr/bin/time -v timeout --signal=INT --kill-after=30s 6300s \
+            /tmp/kissat/build/kissat --no-colors results/alpha22.cnf \
+            > results/kissat.out 2> results/kissat.time
+          echo $? | tee results/kissat.rc
+          grep '^s ' results/kissat.out | tail -1 | tee results/verdict.txt || true
+          set -e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conway99-alpha22-kissat
+          path: results/
+          compression-level: 6
+          retention-days: 30
+
+  sms:
+    needs: build-instance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 115
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build SAT Modulo Symmetries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libboost-program-options-dev libboost-graph-dev
+          git clone --recursive --depth 1 https://github.com/markirch/sat-modulo-symmetries.git /tmp/sms
+          cd /tmp/sms && chmod +x build-and-install.sh && ./build-and-install.sh -l
+      - uses: actions/download-artifact@v4
+        with:
+          name: conway99-alpha22-cnf
+          path: results
+      - name: Solve modulo S22 x S77
+        shell: bash
+        run: |
+          set +e
+          /usr/bin/time -v timeout --signal=INT --kill-after=30s 6300s \
+            /tmp/sms/build/src/smsg -v 99 --dimacs results/alpha22.cnf \
+            --initial-partition 22 77 --frequency 1 --cutoff 0 --timeout 6300 \
+            > results/sms.out 2> results/sms.time
+          echo $? | tee results/sms.rc
+          grep -E 'Result:|s SATISFIABLE|s UNSATISFIABLE|Instance is unknown' results/sms.out \
+            | tail -5 | tee results/verdict.txt || true
+          set -e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conway99-alpha22-sms
+          path: results/
+          compression-level: 6
+          retention-days: 30
