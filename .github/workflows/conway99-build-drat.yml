@@ -1,0 +1,35 @@
+name: Build Conway proof checker
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build drat-trim
+        run: |
+          set -euxo pipefail
+          git clone https://github.com/marijnheule/drat-trim.git /tmp/drat-trim
+          cd /tmp/drat-trim
+          git checkout 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
+          gcc -O3 -DNDEBUG -std=c11 drat-trim.c -o /tmp/drat-trim-bin
+          /tmp/drat-trim-bin 2>&1 | head -5 || true
+          sha256sum /tmp/drat-trim-bin > /tmp/drat-trim.sha256
+          ldd /tmp/drat-trim-bin > /tmp/drat-trim.ldd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conway99-drat-trim-linux-x86_64
+          path: |
+            /tmp/drat-trim-bin
+            /tmp/drat-trim.sha256
+            /tmp/drat-trim.ldd
+          compression-level: 6
+          retention-days: 30
