@@ -14,13 +14,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch and inspect DTRS archive
+      - name: Fetch DTRS archive
         run: |
           set -euxo pipefail
           url='https://webspace.maths.qmul.ac.uk/l.h.soicher/designtheory.org/database/t-designs/t2-v22-b77-r14-k4-L2.icgs.txt.bz2'
           curl -L --fail --retry 4 "$url" -o /tmp/designs.bz2
-          sha256sum /tmp/designs.bz2
+          sha256sum /tmp/designs.bz2 | tee /tmp/SHA256SUMS
           bzip2 -dc /tmp/designs.bz2 > /tmp/designs.txt
           wc -c -l /tmp/designs.txt
-          head -120 /tmp/designs.txt
-          grep -o '<[^ >]*' /tmp/designs.txt | sort | uniq -c | sort -nr | head -80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conway99-design43-dtrs
+          path: |
+            /tmp/designs.bz2
+            /tmp/designs.txt
+            /tmp/SHA256SUMS
+          compression-level: 6
+          retention-days: 30
