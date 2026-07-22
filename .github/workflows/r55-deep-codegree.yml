@@ -1,0 +1,126 @@
+name: R55 deep common-codegree search
+
+on:
+  pull_request:
+    paths:
+      - '.r55-deep/**'
+
+permissions:
+  contents: read
+
+jobs:
+  solve-codegree:
+    strategy:
+      fail-fast: false
+      matrix:
+        k: [10, 11, 12, 13]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build SMS and generator environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git cmake g++ make libboost-program-options-dev libboost-graph-dev python3 python3-pip python3-venv time
+          git clone --recursive --depth 1 https://github.com/markirch/sat-modulo-symmetries.git /tmp/sms
+          cd /tmp/sms
+          chmod +x build-and-install.sh
+          ./build-and-install.sh -l > "$GITHUB_WORKSPACE/build-sms.log" 2>&1
+          test -x build/src/smsg
+          python3 -m venv /tmp/v
+          /tmp/v/bin/pip -q install 'python-sat>=1.8.dev13'
+      - name: Generate exact branch CNF
+        shell: bash
+        env:
+          K: ${{ matrix.k }}
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          cat > /tmp/gen.py <<'PY'
+          import hashlib,itertools,json,os
+          from pysat.card import CardEnc, EncType
+          from pysat.formula import IDPool
+          N=43; K=int(os.environ['K'])
+          E=[[0]*N for _ in range(N)]
+          q=1
+          # SMS GraphHandler order: row-major upper triangle.
+          for i in range(N):
+              for j in range(i+1,N):
+                  E[i][j]=E[j][i]=q; q+=1
+          vp=IDPool(start_from=q)
+          body=f'results/k{K}.body'
+          out=open(body,'w'); nc=0
+          def add(c):
+              global nc
+              out.write(' '.join(map(str,c))+' 0\n'); nc+=1
+          # Ramsey clauses.
+          for S in itertools.combinations(range(N),5):
+              es=[E[i][j] for i,j in itertools.combinations(S,2)]
+              add(es); add([-x for x in es])
+          # Necessary global degree interval from R(4,5)=25.
+          for i in range(N):
+              inc=[E[i][j] for j in range(N) if j!=i]
+              for enc in (CardEnc.atleast(inc,18,vpool=vp,encoding=EncType.seqcounter),
+                          CardEnc.atmost(inc,24,vpool=vp,encoding=EncType.seqcounter)):
+                  for c in enc.clauses: add(c)
+          # Normalize one monochromatic edge 0-1 with exactly K common red neighbours 2..K+1.
+          add([E[0][1]])
+          C=range(2,K+2)
+          for v in C:
+              add([E[0][v]]); add([E[1][v]])
+          for v in range(K+2,N):
+              add([-E[0][v],-E[1][v]])
+          out.close()
+          cnf=f'results/r55_k{K}.cnf'
+          with open(cnf,'w') as f:
+              f.write(f'p cnf {vp.top} {nc}\n')
+              with open(body) as b:
+                  for line in b: f.write(line)
+          os.remove(body)
+          meta={'k':K,'variables':vp.top,'clauses':nc,
+                'sha256':hashlib.sha256(open(cnf,'rb').read()).hexdigest(),
+                'partition':[1,1,K,41-K]}
+          open(f'results/k{K}.meta.json','w').write(json.dumps(meta,indent=2,sort_keys=True))
+          print(json.dumps(meta,sort_keys=True),flush=True)
+          PY
+          /tmp/v/bin/python /tmp/gen.py | tee "results/k${K}.generation.log"
+      - name: Run symmetry-aware exact solver
+        shell: bash
+        env:
+          K: ${{ matrix.k }}
+        run: |
+          set -euo pipefail
+          cd /tmp/sms
+          r=$((41-K))
+          set +e
+          /usr/bin/time -v build/src/smsg -v 43 \
+            --dimacs "$GITHUB_WORKSPACE/results/r55_k${K}.cnf" \
+            --initial-partition 1 1 "$K" "$r" \
+            --frequency 1 --cutoff 0 --timeout 19000 \
+            --sym-break-clauses "$GITHUB_WORKSPACE/results/k${K}.sym" \
+            > "$GITHUB_WORKSPACE/results/k${K}.solver.log" 2> "$GITHUB_WORKSPACE/results/k${K}.time.log"
+          rc=$?
+          set -e
+          echo "$rc" > "$GITHUB_WORKSPACE/results/k${K}.exit.txt"
+          grep -E 'Result:|Instance is unknown|Graph|Total time|Number of graphs' "$GITHUB_WORKSPACE/results/k${K}.solver.log" | tail -100 > "$GITHUB_WORKSPACE/results/k${K}.summary.txt" || true
+          cat "$GITHUB_WORKSPACE/results/k${K}.summary.txt"
+          exit 0
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        env:
+          K: ${{ matrix.k }}
+        run: |
+          set -euo pipefail
+          sha256sum results/* > "results/k${K}.SHA256SUMS" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r55-codegree-k${{ matrix.k }}
+          path: |
+            results/k${{ matrix.k }}.*
+            build-sms.log
+          compression-level: 6
+          retention-days: 1
