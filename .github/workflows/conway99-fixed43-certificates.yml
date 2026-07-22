@@ -40,7 +40,8 @@ jobs:
         run: |
           set -euxo pipefail
           python3 scratch/conway99/fixed_alpha22.py results/designs.txt --index '${{ matrix.index }}' --out-dir results > results/generation.log
-          mv results/design_${{ format('{0:00}', matrix.index) }}.cnf results/formula.cnf
+          idx=$(printf '%02d' '${{ matrix.index }}')
+          mv "results/design_${idx}.cnf" results/formula.cnf
           sha256sum results/formula.cnf > results/formula.sha256
           head -1 results/formula.cnf > results/header.txt
       - name: Solve and emit binary DRAT
