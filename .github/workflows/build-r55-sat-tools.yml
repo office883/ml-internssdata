@@ -1,0 +1,42 @@
+name: Build R55 SAT tools
+
+on:
+  pull_request:
+    paths:
+      - '.solver-build/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build Kissat and CaDiCaL
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git gcc g++ make
+          git clone --depth 1 https://github.com/arminbiere/kissat.git /tmp/kissat
+          cd /tmp/kissat
+          ./configure
+          make -j2
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cp build/kissat "$GITHUB_WORKSPACE/bin/kissat"
+          git clone --depth 1 https://github.com/arminbiere/cadical.git /tmp/cadical
+          cd /tmp/cadical
+          ./configure
+          make -j2
+          cp build/cadical "$GITHUB_WORKSPACE/bin/cadical"
+          strip "$GITHUB_WORKSPACE/bin/"*
+          "$GITHUB_WORKSPACE/bin/kissat" --version
+          "$GITHUB_WORKSPACE/bin/cadical" --version
+          sha256sum "$GITHUB_WORKSPACE/bin/"* > "$GITHUB_WORKSPACE/bin/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-sat-tools
+          path: bin/
+          compression-level: 6
+          retention-days: 1
