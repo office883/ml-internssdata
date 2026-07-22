@@ -1,0 +1,39 @@
+name: Build SAT solver binaries
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Kissat 4.0.4
+        run: |
+          git clone --depth 1 --branch rel-4.0.4 https://github.com/arminbiere/kissat.git /tmp/kissat
+          cd /tmp/kissat && ./configure && make -j2
+          mkdir -p "$GITHUB_WORKSPACE/solvers"
+          cp build/kissat "$GITHUB_WORKSPACE/solvers/kissat-4.0.4"
+          build/kissat --version | tee "$GITHUB_WORKSPACE/solvers/kissat.version"
+          sha256sum "$GITHUB_WORKSPACE/solvers/kissat-4.0.4" | tee "$GITHUB_WORKSPACE/solvers/kissat.sha256"
+      - name: Build SAT Modulo Symmetries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libboost-program-options-dev libboost-graph-dev
+          git clone --recursive --depth 1 https://github.com/markirch/sat-modulo-symmetries.git /tmp/sms
+          cd /tmp/sms && chmod +x build-and-install.sh && ./build-and-install.sh -l
+          cp build/src/smsg "$GITHUB_WORKSPACE/solvers/smsg"
+          ldd build/src/smsg | tee "$GITHUB_WORKSPACE/solvers/smsg.ldd"
+          sha256sum "$GITHUB_WORKSPACE/solvers/smsg" | tee "$GITHUB_WORKSPACE/solvers/smsg.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conway99-linux-x86_64-solvers
+          path: solvers/
+          compression-level: 0
+          retention-days: 30
