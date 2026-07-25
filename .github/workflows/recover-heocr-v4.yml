@@ -18,63 +18,82 @@ jobs:
   recover:
     runs-on: ubuntu-latest
     steps:
-      - name: Reconstruct and verify bundle
+      - name: Download raw bundle parts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/heocr-recovery
           cd /tmp/heocr-recovery
-
           urls=(
             "https://raw.githubusercontent.com/office883/ml-internssdata/f4ed5729131bf36835b662a38d75fec65f9f1e3d/tmp/heocr-v4/bundle.part000"
             "https://raw.githubusercontent.com/office883/ml-internssdata/38e340ff6037445aed8d27f7cd2541f0ba2eb520/tmp/heocr-v4/bundle.part001"
             "https://raw.githubusercontent.com/office883/ml-internssdata/38e340ff6037445aed8d27f7cd2541f0ba2eb520/tmp/heocr-v4/bundle.part002"
             "https://raw.githubusercontent.com/office883/ml-internssdata/38e340ff6037445aed8d27f7cd2541f0ba2eb520/tmp/heocr-v4/bundle.part003"
           )
-
           for i in "${!urls[@]}"; do
-            printf 'Fetching part %s\n' "$i"
-            curl --fail --location --retry 5 --retry-all-errors "${urls[$i]}" -o "part-$i.b64"
+            curl --fail --location --retry 5 --retry-all-errors "${urls[$i]}" -o "bundle.part$(printf '%03d' "$i")"
           done
+          sha256sum bundle.part* > RAW_PARTS.sha256
+          wc -c bundle.part* | tee RAW_PARTS.sizes.txt
 
+      - name: Upload raw source parts for byte-level diagnosis
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v4-raw-parts
+          path: |
+            /tmp/heocr-recovery/bundle.part000
+            /tmp/heocr-recovery/bundle.part001
+            /tmp/heocr-recovery/bundle.part002
+            /tmp/heocr-recovery/bundle.part003
+            /tmp/heocr-recovery/RAW_PARTS.sha256
+            /tmp/heocr-recovery/RAW_PARTS.sizes.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Reconstruct and verify bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-recovery
           python3 - <<'PY'
           from __future__ import annotations
+          import base64, binascii, hashlib, json, pathlib
 
-          import base64
-          import binascii
-          import pathlib
-          import re
-          import sys
-
-          out = pathlib.Path("recovered.tar.gz")
-          out.write_bytes(b"")
-          valid = re.compile(rb"^[A-Za-z0-9+/=]*$")
-
+          out = pathlib.Path('recovered.tar.gz')
+          out.write_bytes(b'')
+          report = []
           for index in range(4):
-              path = pathlib.Path(f"part-{index}.b64")
+              path = pathlib.Path(f'bundle.part{index:03d}')
               raw = path.read_bytes()
-              compact = b"".join(raw.split())
+              compact = b''.join(raw.split())
               invalid = [(i, b) for i, b in enumerate(compact) if not (
-                  65 <= b <= 90 or 97 <= b <= 122 or 48 <= b <= 57 or b in b"+/="
+                  65 <= b <= 90 or 97 <= b <= 122 or 48 <= b <= 57 or b in b'+/='
               )]
-              print(
-                  f"PART {index}: raw={len(raw)} compact={len(compact)} mod4={len(compact) % 4} "
-                  f"invalid_count={len(invalid)} prefix={compact[:16]!r} suffix={compact[-16:]!r}",
-                  flush=True,
-              )
+              item = {
+                  'index': index,
+                  'raw_bytes': len(raw),
+                  'compact_bytes': len(compact),
+                  'mod4': len(compact) % 4,
+                  'invalid': invalid[:100],
+                  'prefix': compact[:32].decode('ascii', 'backslashreplace'),
+                  'suffix': compact[-32:].decode('ascii', 'backslashreplace'),
+              }
+              report.append(item)
               if invalid:
-                  print(f"PART {index} invalid bytes (first 20): {invalid[:20]}", flush=True)
-                  raise SystemExit(20 + index)
+                  pathlib.Path('RECOVERY_DIAGNOSTICS.json').write_text(json.dumps(report, indent=2))
+                  raise SystemExit(f'part {index} has invalid base64 bytes')
               try:
                   decoded = base64.b64decode(compact, validate=True)
               except binascii.Error as exc:
-                  print(f"PART {index} strict base64 decode failed: {exc}", flush=True)
-                  raise SystemExit(30 + index)
-              print(f"PART {index}: decoded={len(decoded)} sha256 pending", flush=True)
-              with out.open("ab") as handle:
+                  item['decode_error'] = str(exc)
+                  pathlib.Path('RECOVERY_DIAGNOSTICS.json').write_text(json.dumps(report, indent=2))
+                  raise
+              item['decoded_bytes'] = len(decoded)
+              item['decoded_sha256'] = hashlib.sha256(decoded).hexdigest()
+              with out.open('ab') as handle:
                   handle.write(decoded)
+          pathlib.Path('RECOVERY_DIAGNOSTICS.json').write_text(json.dumps(report, indent=2))
           PY
-
           sha256sum recovered.tar.gz | tee RECOVERED_ARCHIVE.sha256
           gzip --test recovered.tar.gz
           mkdir extracted
@@ -83,9 +102,19 @@ jobs:
           find extracted -type f | sort > EXTRACTED_CONTENTS.txt
           python3 -m compileall -q extracted
           tar --create --gzip --file heocr-v4-recovered-verified.tar.gz \
-            RECOVERED_ARCHIVE.sha256 EXTRACTED_FILES.sha256 EXTRACTED_CONTENTS.txt extracted
+            RECOVERED_ARCHIVE.sha256 RECOVERY_DIAGNOSTICS.json EXTRACTED_FILES.sha256 EXTRACTED_CONTENTS.txt extracted
           sha256sum heocr-v4-recovered-verified.tar.gz > heocr-v4-recovered-verified.tar.gz.sha256
-          echo "Recovery verification passed."
+
+      - name: Upload diagnostics even when reconstruction fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v4-recovery-diagnostics
+          path: |
+            /tmp/heocr-recovery/RECOVERY_DIAGNOSTICS.json
+            /tmp/heocr-recovery/RECOVERED_ARCHIVE.sha256
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Upload recovered source artifact
         uses: actions/upload-artifact@v4
