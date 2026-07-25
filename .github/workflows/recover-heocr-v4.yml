@@ -32,12 +32,48 @@ jobs:
             "https://raw.githubusercontent.com/office883/ml-internssdata/38e340ff6037445aed8d27f7cd2541f0ba2eb520/tmp/heocr-v4/bundle.part003"
           )
 
-          : > recovered.tar.gz
           for i in "${!urls[@]}"; do
             printf 'Fetching part %s\n' "$i"
             curl --fail --location --retry 5 --retry-all-errors "${urls[$i]}" -o "part-$i.b64"
-            base64 --decode "part-$i.b64" >> recovered.tar.gz
           done
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import binascii
+          import pathlib
+          import re
+          import sys
+
+          out = pathlib.Path("recovered.tar.gz")
+          out.write_bytes(b"")
+          valid = re.compile(rb"^[A-Za-z0-9+/=]*$")
+
+          for index in range(4):
+              path = pathlib.Path(f"part-{index}.b64")
+              raw = path.read_bytes()
+              compact = b"".join(raw.split())
+              invalid = [(i, b) for i, b in enumerate(compact) if not (
+                  65 <= b <= 90 or 97 <= b <= 122 or 48 <= b <= 57 or b in b"+/="
+              )]
+              print(
+                  f"PART {index}: raw={len(raw)} compact={len(compact)} mod4={len(compact) % 4} "
+                  f"invalid_count={len(invalid)} prefix={compact[:16]!r} suffix={compact[-16:]!r}",
+                  flush=True,
+              )
+              if invalid:
+                  print(f"PART {index} invalid bytes (first 20): {invalid[:20]}", flush=True)
+                  raise SystemExit(20 + index)
+              try:
+                  decoded = base64.b64decode(compact, validate=True)
+              except binascii.Error as exc:
+                  print(f"PART {index} strict base64 decode failed: {exc}", flush=True)
+                  raise SystemExit(30 + index)
+              print(f"PART {index}: decoded={len(decoded)} sha256 pending", flush=True)
+              with out.open("ab") as handle:
+                  handle.write(decoded)
+          PY
 
           sha256sum recovered.tar.gz | tee RECOVERED_ARCHIVE.sha256
           gzip --test recovered.tar.gz
