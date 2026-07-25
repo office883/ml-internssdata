@@ -1,6 +1,11 @@
 name: Recover Hebrew OCR v4 bundle
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tmp/heocr-v4-trigger/**'
   pull_request:
     paths:
       - 'tmp/heocr-v4-trigger/**'
