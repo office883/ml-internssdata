@@ -1,0 +1,108 @@
+name: Recover Hebrew OCR v6 source
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v6-trigger/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REF: tmp/heocr-v6-cleanroom-20260726
+      EXPECTED_SHA256: 729850c47fc40f7fdcd1c78ad13f060b1b488c682dc990b40ce9c5b1414ce6d0
+      EXPECTED_BYTES: '55107'
+    steps:
+      - name: Download and strictly reconstruct source archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/heocr-v6-recovery/parts
+          cd /tmp/heocr-v6-recovery
+
+          for i in 000 001 002 003 004 005 006; do
+            path="tmp/heocr-v6-cleanroom/part-${i}.b64"
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${SOURCE_REF}" \
+              --jq '.content' \
+              | tr -d '\n' \
+              | base64 --decode > "parts/part-${i}.b64"
+          done
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import binascii
+          import hashlib
+          import os
+          from pathlib import Path
+
+          root = Path('/tmp/heocr-v6-recovery')
+          payload = bytearray()
+          inventory = []
+          for path in sorted((root / 'parts').glob('part-*.b64')):
+              raw = path.read_bytes()
+              compact = b''.join(raw.split())
+              invalid = [b for b in compact if not (
+                  65 <= b <= 90 or 97 <= b <= 122 or 48 <= b <= 57 or b in b'+/='
+              )]
+              if invalid:
+                  raise SystemExit(f'{path.name}: invalid base64 bytes')
+              if len(compact) % 4:
+                  raise SystemExit(f'{path.name}: base64 length is not divisible by 4')
+              payload.extend(compact)
+              inventory.append((path.name, len(raw), hashlib.sha256(raw).hexdigest()))
+
+          try:
+              archive = base64.b64decode(bytes(payload), validate=True)
+          except binascii.Error as exc:
+              raise SystemExit(f'strict base64 decode failed: {exc}') from exc
+
+          expected_bytes = int(os.environ['EXPECTED_BYTES'])
+          if len(archive) != expected_bytes:
+              raise SystemExit(f'archive size mismatch: {len(archive)} != {expected_bytes}')
+
+          digest = hashlib.sha256(archive).hexdigest()
+          expected = os.environ['EXPECTED_SHA256']
+          if digest != expected:
+              raise SystemExit(f'archive sha256 mismatch: {digest} != {expected}')
+
+          (root / 'hebrew-ocr-unified-v6-source.tar.gz').write_bytes(archive)
+          with (root / 'PARTS.sha256').open('w', encoding='utf-8') as handle:
+              for name, size, sha in inventory:
+                  handle.write(f'{sha}  {name}  {size}\n')
+          (root / 'SOURCE_ARCHIVE.sha256').write_text(
+              f'{digest}  hebrew-ocr-unified-v6-source.tar.gz\n', encoding='utf-8'
+          )
+          print(f'RECOVERY_SHA256={digest}')
+          print(f'RECOVERY_BYTES={len(archive)}')
+          PY
+
+          gzip --test hebrew-ocr-unified-v6-source.tar.gz
+          mkdir extracted
+          tar --extract --gzip --file hebrew-ocr-unified-v6-source.tar.gz --directory extracted
+          tar --list --gzip --file hebrew-ocr-unified-v6-source.tar.gz > SOURCE_CONTENTS.txt
+          find extracted -type f -print0 | sort -z | xargs -0 sha256sum > EXTRACTED_FILES.sha256
+          python3 -m compileall -q extracted
+
+      - name: Upload verified source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v6-recovered-verified
+          path: |
+            /tmp/heocr-v6-recovery/hebrew-ocr-unified-v6-source.tar.gz
+            /tmp/heocr-v6-recovery/SOURCE_ARCHIVE.sha256
+            /tmp/heocr-v6-recovery/PARTS.sha256
+            /tmp/heocr-v6-recovery/SOURCE_CONTENTS.txt
+            /tmp/heocr-v6-recovery/EXTRACTED_FILES.sha256
+            /tmp/heocr-v6-recovery/extracted
+          if-no-files-found: error
+          retention-days: 1
