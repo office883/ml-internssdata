@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SOURCE_REF: tmp/heocr-v5-cleanroom-20260725
-      EXPECTED_SHA256: 72f930e4cbe5353fab578ba99c28216656367b4cb7f15408911172279eba8e03
+      EXPECTED_SHA256: b4d634d19f0f8015010048bee8093ad97426776b51c592bab5c3199f12219e56
       EXPECTED_BYTES: '66909'
     steps:
       - name: Download and strictly reconstruct source archive
