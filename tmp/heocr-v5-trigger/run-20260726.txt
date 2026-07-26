@@ -1,0 +1,1 @@
+trigger strict Hebrew OCR v5 source recovery 2026-07-26
