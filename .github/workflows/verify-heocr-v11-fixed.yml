@@ -1,0 +1,153 @@
+name: Verify Hebrew OCR v11 fixed
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-cleanroom-fixed-trigger/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      V9_RUN_ID: '30280897728'
+      V9_ARTIFACT: heocr-v9-source-verified
+      V9_TREE_SHA: 4cb1de7bcf997060581ed3093dcd89ad25f71cc7
+      V11_REF: tmp/heocr-v11-release-20260727
+      V11_PATCH_GZ_SHA256: fb32a8888ffa86509df5435a8caabb638e79471266a336f98d94c02354bdd0b0
+      V11_PATCH_SHA256: d3205a954a26c9756012ea59b60c0b5deecded975c6739c4b7f4da06bd1a7e97
+      V11_TREE_SHA: 1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a
+      ORIGINAL_V11_COMMIT: b5a2407db2c9df7f22404432d2d7ee6ed3648ffb
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct exact source tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-cleanroom
+          rm -rf "$root"
+          mkdir -p "$root/v9-artifact" "$root/v11-parts" "$root/source"
+          gh run download "$V9_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$V9_ARTIFACT" --dir "$root/v9-artifact"
+          tar -xzf "$root/v9-artifact/hebrew_ocr_unified_builder_v9.tar.gz" -C "$root/source" --strip-components=1
+
+          fetch_part() {
+            local name="$1" size="$2" sha="$3"
+            gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${V11_REF}" --jq '.content' \
+              | tr -d '\n' | base64 --decode > "$root/v11-parts/${name}"
+            test "$(wc -c < "$root/v11-parts/${name}")" -eq "$size"
+            echo "$sha  $root/v11-parts/${name}" | sha256sum -c --status
+          }
+          fetch_part part-000.b64 12000 b643cd6ab072320b6b011b273f8df04ef822156c0ba7c53c7d15f054c4a37a2f
+          fetch_part part-001.b64 12000 f008ca4c97af1c53ca74b37e0f1e0de80fe5ec866ec5e7508d921c582d6c989a
+          fetch_part part-002.b64 7316 1700a881a2ff7f302bf80a0e2f3223f69752479f349428a2e755d7a0dd6a601d
+          cat "$root"/v11-parts/part-*.b64 | tr -d '\n\r\t ' | base64 --decode > "$root/v9-to-v11.patch.gz"
+          echo "$V11_PATCH_GZ_SHA256  $root/v9-to-v11.patch.gz" | sha256sum -c --status
+          gzip -t "$root/v9-to-v11.patch.gz"
+          gzip -dc "$root/v9-to-v11.patch.gz" > "$root/v9-to-v11.patch"
+          echo "$V11_PATCH_SHA256  $root/v9-to-v11.patch" | sha256sum -c --status
+
+          cd "$root/source"
+          printf '$Format:%%H$\n' > SOURCE_COMMIT.txt
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__ .pytest_cache
+          git init
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A
+          git commit -m baseline
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V9_TREE_SHA"
+          git am "$root/v9-to-v11.patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V11_TREE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "EXACT_V11_TREE_RECONSTRUCTED=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Install pinned environment and run every test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v11-cleanroom/source
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-lock.txt
+          python -m pip install --no-deps -e .
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v11-cleanroom/PYTEST.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v11-cleanroom/PYTEST.txt
+          ! grep -q 'skipped' /tmp/heocr-v11-cleanroom/PYTEST.txt
+
+      - name: Build and verify a real four-source mini release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${HF_TOKEN:-}"
+          cd /tmp/heocr-v11-cleanroom/source
+          export PYTHONUNBUFFERED=1 HF_HUB_DISABLE_PROGRESS_BARS=1
+          python -m heocr_unified mini --config config.json --work-dir /tmp/heocr-v11-cleanroom/work --minimum-free-gib 0 --no-upload \
+            2>&1 | tee /tmp/heocr-v11-cleanroom/MINI_BUILD.log
+          python -m heocr_unified verify --mini --config config.json --work-dir /tmp/heocr-v11-cleanroom/work --minimum-free-gib 0 --no-upload \
+            2>&1 | tee /tmp/heocr-v11-cleanroom/VERIFY.log
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          root=Path('/tmp/heocr-v11-cleanroom/work/output-mini')
+          required=['LOCAL_READY.json','qa/QA_REPORT.json','qa/CORRUPTION_REPORT.json','RELEASE_MANIFEST.json','previews/PREVIEW_INVENTORY.json','BUILD_SUMMARY.json','SOURCE_INVENTORY.json','FONT_MANIFEST.json','ARCHITECTURE_TEXT_RESOLVER.json','VERIFIED_POINTED_AUDIT.json','EVALUATION_RESERVATIONS.json']
+          for rel in required:
+              p=root/rel
+              assert p.is_file() and p.stat().st_size, rel
+          ready=json.loads((root/'LOCAL_READY.json').read_text())
+          qa=json.loads((root/'qa/QA_REPORT.json').read_text())
+          corr=json.loads((root/'qa/CORRUPTION_REPORT.json').read_text())
+          pointed=json.loads((root/'VERIFIED_POINTED_AUDIT.json').read_text())
+          reservations=json.loads((root/'EVALUATION_RESERVATIONS.json').read_text())
+          assert ready['status']=='PASS' and ready['mode']=='mini'
+          assert ready['integrity_errors']==ready['leakage_errors']==0
+          assert ready['total_rows']>0 and ready['preview_sheets']>0
+          assert qa['integrity_errors']==qa['leakage_errors']==0
+          assert qa['required_configs_present'] and qa['required_source_families_present']
+          assert corr['status']=='PASS' and corr['test_count']>=7
+          assert all(x['status']=='PASS' for x in corr['tests'])
+          assert pointed['status']=='PASS' and pointed['canonical_texts']>=50000
+          assert reservations['status']=='PASS'
+          assert reservations['reserved']+reservations['duplicates']==reservations['candidates']
+          print('V11_MINI_READY='+json.dumps(ready,sort_keys=True))
+          PY
+
+      - name: Package the verified source and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-cleanroom
+          cd "$root/source"
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v11/ -o "$root/hebrew_ocr_unified_builder_v11.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v11/ -o "$root/hebrew_ocr_unified_builder_v11.zip" HEAD
+          mkdir -p "$root/evidence"
+          cp "$root/PYTEST.txt" "$root/MINI_BUILD.log" "$root/VERIFY.log" "$root/evidence/"
+          for rel in LOCAL_READY.json RELEASE_MANIFEST.json BUILD_SUMMARY.json SOURCE_INVENTORY.json FONT_MANIFEST.json ARCHITECTURE_TEXT_RESOLVER.json VERIFIED_POINTED_AUDIT.json EVALUATION_RESERVATIONS.json qa/QA_REPORT.json qa/CORRUPTION_REPORT.json previews/PREVIEW_INVENTORY.json; do
+            cp "$root/work/output-mini/$rel" "$root/evidence/$(basename "$rel")"
+          done
+          sha256sum "$root/hebrew_ocr_unified_builder_v11.tar.gz" "$root/hebrew_ocr_unified_builder_v11.zip" > "$root/evidence/SHA256SUMS.txt"
+          printf '%s\n' "$ORIGINAL_V11_COMMIT" > "$root/evidence/ORIGINAL_SOURCE_COMMIT.txt"
+          git rev-parse HEAD > "$root/evidence/CLEANROOM_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/SOURCE_TREE.txt"
+          tar -tzf "$root/hebrew_ocr_unified_builder_v11.tar.gz" > "$root/evidence/SOURCE_CONTENTS.txt"
+          echo HEOCR_V11_CLEANROOM_RELEASE_PASS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v11-cleanroom-verified-fixed
+          path: |
+            /tmp/heocr-v11-cleanroom/hebrew_ocr_unified_builder_v11.tar.gz
+            /tmp/heocr-v11-cleanroom/hebrew_ocr_unified_builder_v11.zip
+            /tmp/heocr-v11-cleanroom/evidence
+          if-no-files-found: error
+          retention-days: 1
