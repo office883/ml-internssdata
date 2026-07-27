@@ -1,0 +1,116 @@
+name: Verify Hebrew OCR v11 code
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-code-trigger/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      V9_RUN_ID: '30280897728'
+      V9_ARTIFACT: heocr-v9-source-verified
+      V9_TREE_SHA: e1afe15671546e3a19172a75b84868e35ebb452f
+      V11_REF: tmp/heocr-v11-release-20260727
+      V11_PATCH_GZ_SHA256: fb32a8888ffa86509df5435a8caabb638e79471266a336f98d94c02354bdd0b0
+      V11_PATCH_SHA256: d3205a954a26c9756012ea59b60c0b5deecded975c6739c4b7f4da06bd1a7e97
+      V11_TREE_SHA: 1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a
+      ORIGINAL_V11_COMMIT: b5a2407db2c9df7f22404432d2d7ee6ed3648ffb
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct exact v11 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-code
+          rm -rf "$root" && mkdir -p "$root/artifact" "$root/source" "$root/parts"
+          gh run download "$V9_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$V9_ARTIFACT" --dir "$root/artifact"
+          tar -xzf "$root/artifact/hebrew_ocr_unified_builder_v9.tar.gz" -C "$root/source" --strip-components=1
+
+          fetch_part() {
+            local name="$1" size="$2" sha="$3"
+            gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${V11_REF}" --jq '.content' \
+              | tr -d '\n' | base64 -d > "$root/parts/$name"
+            test "$(wc -c < "$root/parts/$name")" -eq "$size"
+            echo "$sha  $root/parts/$name" | sha256sum -c --status
+          }
+          fetch_part part-000.b64 12000 b643cd6ab072320b6b011b273f8df04ef822156c0ba7c53c7d15f054c4a37a2f
+          fetch_part part-001.b64 12000 f008ca4c97af1c53ca74b37e0f1e0de80fe5ec866ec5e7508d921c582d6c989a
+          fetch_part part-002.b64 7316 1700a881a2ff7f302bf80a0e2f3223f69752479f349428a2e755d7a0dd6a601d
+          cat "$root"/parts/part-*.b64 | tr -d '\n\r\t ' | base64 -d > "$root/patch.gz"
+          echo "$V11_PATCH_GZ_SHA256  $root/patch.gz" | sha256sum -c --status
+          gzip -t "$root/patch.gz"
+          gzip -dc "$root/patch.gz" > "$root/patch"
+          echo "$V11_PATCH_SHA256  $root/patch" | sha256sum -c --status
+
+          cd "$root/source"
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__ .pytest_cache
+          git init -q
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A && git commit -q -m baseline
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V9_TREE_SHA"
+          git am "$root/patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V11_TREE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "V11_RECONSTRUCTED_COMMIT=$(git rev-parse HEAD)"
+          echo "V11_RECONSTRUCTED_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Install exact pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v11-code/source
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements-lock.txt
+          python -m pip install --no-deps --editable .
+
+      - name: Run all static and runtime tests without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v11-code/source
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v11-code/PYTEST.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v11-code/PYTEST.txt
+          ! grep -q 'skipped' /tmp/heocr-v11-code/PYTEST.txt
+          test -z "$(git status --porcelain)"
+          echo HEOCR_V11_CODE_CLEANROOM_PASS
+
+      - name: Package verified tree and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-code
+          cd "$root/source"
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v11/ -o "$root/hebrew_ocr_unified_builder_v11.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v11/ -o "$root/hebrew_ocr_unified_builder_v11.zip" HEAD
+          mkdir -p "$root/evidence"
+          cp "$root/PYTEST.txt" "$root/evidence/"
+          sha256sum "$root/hebrew_ocr_unified_builder_v11.tar.gz" "$root/hebrew_ocr_unified_builder_v11.zip" > "$root/evidence/SHA256SUMS.txt"
+          printf '%s\n' "$ORIGINAL_V11_COMMIT" > "$root/evidence/ORIGINAL_SOURCE_COMMIT.txt"
+          git rev-parse HEAD > "$root/evidence/CLEANROOM_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/SOURCE_TREE.txt"
+          tar -tzf "$root/hebrew_ocr_unified_builder_v11.tar.gz" > "$root/evidence/SOURCE_CONTENTS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v11-code-cleanroom-verified
+          path: |
+            /tmp/heocr-v11-code/hebrew_ocr_unified_builder_v11.tar.gz
+            /tmp/heocr-v11-code/hebrew_ocr_unified_builder_v11.zip
+            /tmp/heocr-v11-code/evidence
+          if-no-files-found: error
+          retention-days: 1
