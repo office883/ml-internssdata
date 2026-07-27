@@ -1,0 +1,65 @@
+name: Test Hebrew OCR v11 runtime
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-runtime-trigger/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V9_RUN_ID: '30280897728'
+      V9_ARTIFACT: heocr-v9-source-verified
+      V11_REF: tmp/heocr-v11-release-20260727
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct source
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-runtime
+          rm -rf "$root"; mkdir -p "$root/a" "$root/s" "$root/p"
+          gh run download "$V9_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$V9_ARTIFACT" --dir "$root/a"
+          tar -xzf "$root/a/hebrew_ocr_unified_builder_v9.tar.gz" -C "$root/s" --strip-components=1
+          for name in part-000.b64 part-001.b64 part-002.b64; do
+            gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${V11_REF}" --jq '.content' | tr -d '\n' | base64 -d > "$root/p/$name"
+          done
+          cat "$root"/p/part-*.b64 | tr -d '\n\r\t ' | base64 -d | gzip -dc > "$root/patch"
+          cd "$root/s"
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__ .pytest_cache
+          git init -q
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A && git commit -q -m baseline
+          git am "$root/patch" >/dev/null
+          test "$(git rev-parse 'HEAD^{tree}')" = 1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a
+      - name: Install dependencies quietly
+        shell: bash
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r /tmp/heocr-v11-runtime/s/requirements-lock.txt
+          python -m pip install -q --no-deps -e /tmp/heocr-v11-runtime/s
+      - name: Run PyArrow and full suites with concise tracebacks
+        shell: bash
+        run: |
+          set +e
+          cd /tmp/heocr-v11-runtime/s
+          python -m pytest tests/test_writer_contract.py tests/test_corruption_contract.py -vv --tb=short > /tmp/pyarrow-tests.log 2>&1
+          rc1=$?
+          echo PYARROW_TEST_RC=$rc1
+          cat /tmp/pyarrow-tests.log
+          python -m pytest -q --disable-warnings --tb=short > /tmp/full-tests.log 2>&1
+          rc2=$?
+          echo FULL_TEST_RC=$rc2
+          tail -200 /tmp/full-tests.log
+          if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then exit 1; fi
+          echo HEOCR_V11_ALL_RUNTIME_TESTS_PASS
