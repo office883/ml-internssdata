@@ -1,0 +1,52 @@
+name: Inspect Hebrew OCR v11 tree
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-tree-trigger/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V9_RUN_ID: '30280897728'
+      V9_ARTIFACT: heocr-v9-source-verified
+      V11_REF: tmp/heocr-v11-release-20260727
+    steps:
+      - name: Report resulting tree and status
+        shell: bash
+        run: |
+          set -u
+          root=/tmp/heocr-v11-tree
+          rm -rf "$root"; mkdir -p "$root/a" "$root/s" "$root/p"
+          gh run download "$V9_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$V9_ARTIFACT" --dir "$root/a" >/dev/null
+          tar -xzf "$root/a/hebrew_ocr_unified_builder_v9.tar.gz" -C "$root/s" --strip-components=1
+          for name in part-000.b64 part-001.b64 part-002.b64; do
+            gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${V11_REF}" --jq '.content' | tr -d '\n' | base64 -d > "$root/p/$name"
+          done
+          cat "$root"/p/part-*.b64 | tr -d '\n\r\t ' | base64 -d | gzip -dc > "$root/patch"
+          cd "$root/s"
+          printf '$Format:%%H$\n' > SOURCE_COMMIT.txt
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__ .pytest_cache
+          git init -q
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A && git commit -q -m baseline
+          echo "BEFORE_TREE=$(git rev-parse 'HEAD^{tree}')"
+          git am "$root/patch" >/tmp/am.out 2>/tmp/am.err
+          rc=$?
+          echo "AM_RC=$rc"
+          sed -n '1,20p' /tmp/am.out
+          sed -n '1,40p' /tmp/am.err
+          if git rev-parse HEAD >/dev/null 2>&1; then echo "AFTER_TREE=$(git rev-parse 'HEAD^{tree}')"; fi
+          echo 'STATUS_BEGIN'
+          git status --porcelain=v1
+          echo 'STATUS_END'
+          echo 'EXPECTED_TREE=1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a'
+          exit 0
