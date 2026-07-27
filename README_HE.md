@@ -1,4 +1,4 @@
-# Hebrew OCR Unified Builder v9
+# Hebrew OCR Unified Builder v11
 
 כלי fail-closed לבניית מאגר OCR/HTR עברי מאוחד מארבעת המאגרים הפרטיים בחשבון `ssdataanalysis`:
 
@@ -36,7 +36,7 @@ chmod +x RUN_ME.command
 8. העלאה ל־dataset פרטי ואימות הורדה חוזרת.
 9. יצירת `REMOTE_READY.json` רק לאחר התאמה מלאה של המאגר המרוחק.
 
-קובצי העבודה נשמרים ב־`~/hebrew-ocr-unified-work-v9`. אפשר להריץ שוב לאחר ניתוק; completed source units נבדקים מחדש לפי hash ומספר שורות לפני resume.
+קובצי העבודה נשמרים ב־`~/hebrew-ocr-unified-work-v11`. אפשר להריץ שוב לאחר ניתוק; completed source units נבדקים מחדש לפי hash ומספר שורות לפני resume. זהות הבנייה קשורה לא רק ל־config ול־revisions אלא גם ל־SHA-256 דטרמיניסטי של כל קוד ה־builder ושל קובצי התלויות הנעולים. שינוי קוד עם אותו מספר גרסה אינו יכול להמשיך build ישן בשקט.
 
 ## חותמות מוכנות
 
@@ -47,6 +47,9 @@ chmod +x RUN_ME.command
 - `RELEASE_MANIFEST.json`
 - `CHECKSUMS.sha256`
 - `previews/PREVIEW_INVENTORY.json`
+- `VERIFIED_POINTED_AUDIT.json` — קושר את קורפוס הניקוד למניפסט, ל־revision ול־SHA-256 המדויקים שלו.
+
+מסלול `verified_pointed_rerender` מפיק מחדש יותר מ־100 אלף שורות מנוקדות מ־ground truth לוגי מאומת, בעוד שתמונות המקור Tier-B נשארות ב־extended ואינן מקודמות ל־gold.
 
 חומר Architecture שמקורו בסריקות OCR קודמות אינו משמש כתווית זהב. כל מקטע Tier-A נקי חייב להיכנס כפלט קנוני או לקבל outcome מפורש ב־ledger; כשל רינדור של Tier-A מפיל את הבנייה במקום להיעלם בשקט.
 

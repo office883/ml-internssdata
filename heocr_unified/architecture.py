@@ -110,10 +110,30 @@ class ArchitectureTextResolver:
             int(segment.segment_index),
         )
 
+    def _owners_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+        for row in self.db.execute(
+            "SELECT text_sha256,segment_key,split FROM owners ORDER BY text_sha256"
+        ):
+            digest.update("\x1f".join(map(str, row)).encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
     def build(self, corpus: "ArchitectureCorpus") -> dict[str, int | str]:
         completed = self.db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
         if completed is not None:
-            return json.loads(completed[0])
+            summary = json.loads(completed[0])
+            if self.db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("architecture resolver SQLite integrity check failed")
+            actual = int(self.db.execute("SELECT COUNT(*) FROM owners").fetchone()[0])
+            if (
+                actual == int(summary.get("canonical_gold_texts", -1))
+                and self._owners_fingerprint() == str(summary.get("fingerprint") or "")
+            ):
+                return summary
+            self.db.execute("DELETE FROM metadata WHERE key='summary'")
+            self.db.execute("DELETE FROM owners")
+            self.db.commit()
 
         self.db.execute("DELETE FROM owners")
         gold_occurrences = 0
@@ -151,19 +171,13 @@ class ArchitectureTextResolver:
                 )
         self.db.commit()
         canonical = int(self.db.execute("SELECT COUNT(*) FROM owners").fetchone()[0])
-        digest = hashlib.sha256()
-        for row in self.db.execute(
-            "SELECT text_sha256,segment_key,split FROM owners ORDER BY text_sha256"
-        ):
-            digest.update("\x1f".join(map(str, row)).encode("utf-8"))
-            digest.update(b"\n")
         summary: dict[str, int | str] = {
             "source_revision": self.source_revision,
             "policy": self.policy,
             "gold_occurrences": gold_occurrences,
             "canonical_gold_texts": canonical,
             "duplicate_gold_occurrences": gold_occurrences - canonical,
-            "fingerprint": digest.hexdigest(),
+            "fingerprint": self._owners_fingerprint(),
         }
         self.db.execute(
             "INSERT INTO metadata(key,value) VALUES('summary',?)",

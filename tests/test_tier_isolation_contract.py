@@ -46,6 +46,7 @@ def test_acceptance_uses_gold_counts_not_all_rows() -> None:
             "minimum_mixed_bidi": 1,
             "minimum_with_digits": 1,
             "minimum_with_combining_marks": 1,
+            "minimum_verified_pointed_rerender": 1,
         }
     }
     summary = {
@@ -63,6 +64,7 @@ def test_acceptance_uses_gold_counts_not_all_rows() -> None:
         "mixed_bidi": 1,
         "with_digits": 1,
         "with_combining_marks": 1,
+        "verified_pointed_rerender": 1,
         "architecture_gold_total": 1,
         "architecture_gold_accounted": 1,
         "leakage_errors": 0,

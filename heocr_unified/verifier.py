@@ -56,6 +56,150 @@ def _point_in_bounds(point: Any, width: int, height: int) -> bool:
     )
 
 
+def base_config_name(config_name: str) -> str:
+    value = str(config_name)
+    for suffix in ("_quarantine", "_extended"):
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def required_config_families_present(required: set[str], present: set[str]) -> bool:
+    families = {base_config_name(name) for name in present}
+    return set(required).issubset(families)
+
+
+def _read_json_file(path: Path, *, description: str) -> dict[str, Any]:
+    if not path.is_file() or path.stat().st_size < 2:
+        raise VerificationError(f"missing {description}: {path.name}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerificationError(f"invalid {description}: {path.name}") from exc
+    if not isinstance(payload, dict):
+        raise VerificationError(f"{description} must be a JSON object")
+    return payload
+
+
+def verify_evaluation_reservations(output_root: str | Path) -> dict[str, Any]:
+    root = Path(output_root)
+    report = _read_json_file(
+        root / "EVALUATION_RESERVATIONS.json", description="evaluation reservation report"
+    )
+    if str(report.get("status") or "") != "PASS":
+        raise VerificationError("evaluation reservation report is not PASS")
+    try:
+        candidates = int(report["candidates"])
+        reserved = int(report["reserved"])
+        rejected = int(report["rejected"])
+        visual = int(report["visual_candidates"])
+        generated = int(report["generated_candidates"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VerificationError("evaluation reservation counts are invalid") from exc
+    if candidates < 1 or reserved < 1:
+        raise VerificationError("evaluation reservation report is empty")
+    if candidates != reserved + rejected or candidates != visual + generated:
+        raise VerificationError("evaluation reservation accounting mismatch")
+    rejects = report.get("rejects")
+    if not isinstance(rejects, dict) or sum(int(value) for value in rejects.values()) != rejected:
+        raise VerificationError("evaluation reservation reject accounting mismatch")
+    fingerprint = str(report.get("fingerprint") or "")
+    if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint):
+        raise VerificationError("evaluation reservation fingerprint is invalid")
+    return report
+
+
+def verify_pointed_audit(output_root: str | Path, *, config: Mapping[str, Any]) -> dict[str, Any]:
+    root = Path(output_root)
+    audit = _read_json_file(root / "VERIFIED_POINTED_AUDIT.json", description="pointed audit")
+    inventory = _read_json_file(root / "SOURCE_INVENTORY.json", description="source inventory")
+    source = dict(config["sources"]["ocr"])
+    item = inventory.get("verified_pointed")
+    if not isinstance(item, dict):
+        raise VerificationError("source inventory lacks verified_pointed")
+
+    expected_path = str(config.get("pointed_manifest_path") or "manifests/strict_all.jsonl.gz")
+    if str(item.get("repo_id") or "") != str(source["repo_id"]):
+        raise VerificationError("pointed inventory repo mismatch")
+    if str(item.get("revision") or "") != str(source["revision"]):
+        raise VerificationError("pointed inventory revision mismatch")
+    if str(item.get("path") or "") != expected_path:
+        raise VerificationError("pointed inventory path mismatch")
+    inventory_sha = str(item.get("sha256") or "")
+    if len(inventory_sha) != 64:
+        raise VerificationError("pointed inventory lacks manifest SHA-256")
+    if str(audit.get("manifest_sha256") or "") != inventory_sha:
+        raise VerificationError("pointed audit manifest SHA mismatch")
+    if str(audit.get("source_revision") or "") != str(source["revision"]):
+        raise VerificationError("pointed audit source revision mismatch")
+    if str(audit.get("status") or "") != "PASS":
+        raise VerificationError("pointed audit is not PASS")
+    if str(audit.get("policy") or "") != "test_synthetic>validation_synthetic>train":
+        raise VerificationError("pointed audit policy mismatch")
+    if int(audit.get("max_graphemes", -1)) != int(config["pointed_max_graphemes"]):
+        raise VerificationError("pointed audit grapheme limit mismatch")
+
+    by_split_raw = audit.get("by_split")
+    if not isinstance(by_split_raw, dict):
+        raise VerificationError("pointed audit lacks split counts")
+    required_splits = ("train", "validation_synthetic", "test_synthetic")
+    try:
+        by_split = {split: int(by_split_raw[split]) for split in required_splits}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VerificationError("pointed audit split counts are invalid") from exc
+    if any(value < 1 for value in by_split.values()):
+        raise VerificationError("pointed audit has an empty canonical split")
+    canonical = int(audit.get("canonical_texts", -1))
+    eligible = int(audit.get("eligible_occurrences", -1))
+    duplicates = int(audit.get("duplicate_occurrences", -1))
+    if len(str(audit.get("entries_fingerprint") or "")) != 64:
+        raise VerificationError("pointed audit lacks entries fingerprint")
+    if canonical != sum(by_split.values()):
+        raise VerificationError("pointed audit canonical count mismatch")
+    if eligible != canonical + duplicates:
+        raise VerificationError("pointed audit duplicate accounting mismatch")
+    if not (int(audit.get("manifest_rows", -1)) >= int(audit.get("matching_rows", -1)) >= eligible):
+        raise VerificationError("pointed audit source count ordering is invalid")
+    minimum = int(config["acceptance"].get("minimum_pointed_canonical_texts", 1))
+    if canonical < minimum:
+        raise VerificationError(f"pointed audit canonical_texts={canonical} < {minimum}")
+
+    fingerprint = str(audit.get("fingerprint") or "")
+    payload = {key: value for key, value in audit.items() if key != "fingerprint"}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != fingerprint:
+        raise VerificationError("pointed audit fingerprint mismatch")
+    return audit
+
+
+def validate_verified_pointed_row(
+    row: Mapping[str, Any], *, config_name: str, audit: Mapping[str, Any], label: NormalizedLabel
+) -> None:
+    if str(row.get("label_source") or "") != "verified_text_rerender":
+        return
+    if base_config_name(config_name) != "verified_pointed_rerender":
+        raise VerificationError("verified pointed row is in the wrong config")
+    if str(row.get("data_tier") or "") != "gold" or str(row.get("label_trust") or "") != "gold":
+        raise VerificationError("verified pointed row is not gold")
+    if not bool(row.get("is_synthetic")) or str(row.get("sample_origin") or "") != "synthetic":
+        raise VerificationError("verified pointed row has the wrong origin")
+    if str(row.get("modality") or "") != "pointed_print" or label.combining_marks < 1:
+        raise VerificationError("verified pointed row is not actually pointed print")
+    if str(row.get("source_repo") or "") != "ssdataanalysis/hebrew-ocr-corpus":
+        raise VerificationError("verified pointed row source repo mismatch")
+    if str(row.get("source_path") or "") != "manifests/strict_all.jsonl.gz#biblical_pointed_lines":
+        raise VerificationError("verified pointed row source path mismatch")
+    provenance = _json_object(row.get("provenance_json"), field="provenance_json", expected=dict)
+    if str(provenance.get("generator") or "") != "verified-pointed-v11":
+        raise VerificationError("verified pointed generator mismatch")
+    if str(provenance.get("manifest_sha256") or "") != str(audit.get("manifest_sha256") or ""):
+        raise VerificationError("verified pointed row manifest SHA mismatch")
+    if str(provenance.get("source_dataset") or "") != "samaritan-ai/hebrew_synth_lines":
+        raise VerificationError("verified pointed source dataset mismatch")
+    if str(provenance.get("source_license") or "").lower() != "mit":
+        raise VerificationError("verified pointed source license mismatch")
+
+
 def _expected_tier_for_config(config_name: str) -> str:
     if config_name.endswith("_quarantine"):
         return "quarantine"
@@ -201,6 +345,7 @@ def enforce_acceptance(summary: Mapping[str, Any], *, config: Mapping[str, Any],
         "mixed_bidi": "minimum_mixed_bidi",
         "with_digits": "minimum_with_digits",
         "with_combining_marks": "minimum_with_combining_marks",
+        "verified_pointed_rerender": "minimum_verified_pointed_rerender",
     }
     if mini:
         for key in actual_keys:
@@ -289,6 +434,8 @@ def verify_output_dataset(
         str(item["repo_id"]): str(item["revision"])
         for item in config["sources"].values()
     }
+    reservation_report = verify_evaluation_reservations(root)
+    pointed_audit = verify_pointed_audit(root, config=config)
     verifier_db = _init_verification_db(qa_dir / "verification.sqlite")
     counts = collections.Counter()
     split_counts = collections.Counter()
@@ -330,6 +477,9 @@ def verify_output_dataset(
                     try:
                         label = validate_row(row, source_revisions=source_revisions)
                         enforce_config_tier(config_name, row)
+                        validate_verified_pointed_row(
+                            row, config_name=config_name, audit=pointed_audit, label=label
+                        )
                     except Exception:
                         integrity_errors += 1
                         raise
@@ -462,6 +612,8 @@ def verify_output_dataset(
                         if label.mixed_bidi: counts["mixed_bidi"] += 1
                         if label.digits: counts["with_digits"] += 1
                         if label.combining_marks: counts["with_combining_marks"] += 1
+                        if str(row.get("label_source")) == "verified_text_rerender":
+                            counts["verified_pointed_rerender"] += 1
                     source_repo = str(row["source_repo"])
                     source_family = ""
                     if source_repo.endswith("hebrew-htr-curated-v1"): source_family = "htr"
@@ -502,9 +654,9 @@ def verify_output_dataset(
             "rabbinic_rashi_lines", "handwriting_real_lines", "handwriting_historical_lines",
             "handwriting_synthetic_lines", "handwriting_real_characters",
             "architecture_synthetic_lines", "architecture_structured_lines",
-            "architecture_synthetic_pages",
+            "architecture_synthetic_pages", "verified_pointed_rerender",
         }
-        counts["required_configs_present"] = required_configs.issubset(configs_present)
+        counts["required_configs_present"] = required_config_families_present(required_configs, configs_present)
         counts["required_source_families_present"] = {"htr","foundation","ocr","architecture"}.issubset(gold_source_families)
         summary = {
             **dict(counts),
@@ -513,6 +665,8 @@ def verify_output_dataset(
             "source_families": sorted(source_families),
             "gold_source_families": sorted(gold_source_families),
             "architecture_ledger": ledger,
+            "verified_pointed_audit": pointed_audit,
+            "evaluation_reservations": reservation_report,
             "registry_samples": registry.sample_count(),
             "registered_artifacts": len(registered),
             "elapsed_seconds": round(time.time() - started, 3),

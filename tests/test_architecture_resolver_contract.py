@@ -57,3 +57,19 @@ def test_resolver_is_deterministic_across_reopen(tmp_path: Path) -> None:
     summary_b = second.build(corpus)
     assert summary_a == summary_b
     second.close()
+
+
+def test_architecture_resolver_rebuilds_if_cached_owner_table_is_incomplete(tmp_path: Path) -> None:
+    corpus = _fixture(tmp_path)
+    path = tmp_path / "resolver.sqlite"
+    first = ArchitectureTextResolver(path, source_revision="a" * 40)
+    assert first.build(corpus)["canonical_gold_texts"] == 1
+    first.db.execute("DELETE FROM owners")
+    first.db.commit()
+    first.close()
+
+    second = ArchitectureTextResolver(path, source_revision="a" * 40)
+    summary = second.build(corpus)
+    assert summary["canonical_gold_texts"] == 1
+    assert second.owner(next(corpus.iter_raw_segments()).text_sha256) is not None
+    second.close()

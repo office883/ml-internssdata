@@ -64,6 +64,11 @@ def test_architecture_chunk_renders_gold_and_accounts_every_segment(tmp_path: Pa
     assert ledger["outcomes"]["accepted"] == 1
     assert ledger["outcomes"]["duplicate"] == 1
     assert ledger["outcomes"]["quarantined"] == 1
+    stored = registry.db.execute(
+        "SELECT data_tier,sample_origin FROM samples WHERE source_key=?",
+        ("architecture:chunk:0",),
+    ).fetchall()
+    assert stored == [("gold", "synthetic")]
 
 
 def test_gold_architecture_render_failure_is_fatal_not_quarantined(tmp_path: Path) -> None:

@@ -11,3 +11,5 @@ def test_cli_has_one_command_run_and_no_deprecated_uploader() -> None:
     launcher=Path("RUN_ME.command").read_text(encoding="utf-8")
     assert "upload-large-folder" not in launcher
     assert "heocr_unified run" in launcher
+    assert "python3.12 python3.11 python3.13" in launcher
+    assert "Python 3.11–3.13" in launcher

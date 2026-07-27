@@ -48,6 +48,27 @@ def verify_completed_source(
     return report
 
 
+def iter_downloaded_task_rows(
+    *,
+    task: SourceTask,
+    local_path: str | Path,
+    limit: int | None = None,
+):
+    source = Path(local_path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    if task.size and source.stat().st_size != int(task.size):
+        raise ValueError(
+            f"downloaded source size mismatch: {task.path}: {source.stat().st_size} != {task.size}"
+        )
+    mapped = classify_source_task(task)
+    if task.family == "htr":
+        return iter_htr_parquet(str(source), task=task, mapped=mapped, limit=limit)
+    if task.family in {"ocr", "foundation"}:
+        return iter_webdataset_source(str(source), task=task, mapped=mapped, limit=limit)
+    raise ValueError(f"unsupported visual source family: {task.family}")
+
+
 def process_downloaded_task(
     *,
     task: SourceTask,
@@ -86,12 +107,7 @@ def process_downloaded_task(
             source_token=token,
             rows_per_shard=int(config["rows_per_shard"]),
         )
-    if task.family == "htr":
-        rows = iter_htr_parquet(str(source), task=task, mapped=mapped, limit=limit)
-    elif task.family in {"ocr", "foundation"}:
-        rows = iter_webdataset_source(str(source), task=task, mapped=mapped, limit=limit)
-    else:
-        raise ValueError(f"unsupported visual source family: {task.family}")
+    rows = iter_downloaded_task_rows(task=task, local_path=source, limit=limit)
     return process_source_rows(
         source_key=task.source_key,
         rows=rows,

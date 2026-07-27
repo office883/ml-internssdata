@@ -130,6 +130,17 @@ class DedupRegistry:
               sample_id TEXT NOT NULL,
               PRIMARY KEY(kind,entity_key,data_tier)
             );
+            CREATE TABLE IF NOT EXISTS evaluation_visual_owners(
+              visual_sha256 TEXT NOT NULL,
+              data_tier TEXT NOT NULL,
+              text_sha256 TEXT NOT NULL,
+              split TEXT NOT NULL,
+              priority INTEGER NOT NULL,
+              sample_id TEXT NOT NULL,
+              PRIMARY KEY(visual_sha256,data_tier)
+            );
+            CREATE INDEX IF NOT EXISTS evaluation_visual_lookup_idx
+              ON evaluation_visual_owners(visual_sha256,data_tier,split);
             CREATE TABLE IF NOT EXISTS text_counts(
               task TEXT NOT NULL,
               split TEXT NOT NULL,
@@ -207,6 +218,41 @@ class DedupRegistry:
             )
         return self._owner_reason("evaluation", kind, owner_split)
 
+    def _check_evaluation_visual_owner(
+        self,
+        *,
+        visual_sha256: str,
+        text_sha256: str,
+        split: str,
+        priority: int,
+        data_tier: str,
+    ) -> str | None:
+        if not visual_sha256 or data_tier == "quarantine":
+            return None
+        conflicts: list[str] = []
+        for owner_tier in owner_scopes(data_tier):
+            row = self.db.execute(
+                "SELECT text_sha256,split,priority FROM evaluation_visual_owners "
+                "WHERE visual_sha256=? AND data_tier=? LIMIT 1",
+                (visual_sha256, owner_tier),
+            ).fetchone()
+            if row is None:
+                continue
+            owner_text, owner_split, owner_priority = str(row[0]), str(row[1]), int(row[2])
+            if owner_text != text_sha256:
+                raise RegistryConflict("evaluation visual-label conflict")
+            if owner_split == split:
+                continue
+            if priority < owner_priority:
+                raise RegistryConflict(
+                    f"higher-priority evaluation visual arrived late: {split} should precede {owner_split}"
+                )
+            if split == "train":
+                conflicts.append("train_visual_reserved_by_evaluation")
+            else:
+                conflicts.append(self._owner_reason("evaluation", "visual", owner_split))
+        return sorted(conflicts)[0] if conflicts else None
+
     def _reserve_evaluation_owners(
         self,
         *,
@@ -214,15 +260,26 @@ class DedupRegistry:
         priority: int,
         task: str,
         text_sha256: str,
+        visual_sha256: str,
         writer_key: str,
         document_key: str,
         page_key: str,
         sample_id: str,
         data_tier: str,
+        record_reject: bool = True,
     ) -> AcceptDecision | None:
         if data_tier == "quarantine":
             return None
         conflicts: list[str] = []
+        visual_reason = self._check_evaluation_visual_owner(
+            visual_sha256=visual_sha256,
+            text_sha256=text_sha256,
+            split=split,
+            priority=priority,
+            data_tier=data_tier,
+        )
+        if visual_reason:
+            conflicts.append(visual_reason)
         for owner_tier in owner_scopes(data_tier):
             if task in _LINE_TASKS:
                 reason = self._check_owner(
@@ -249,8 +306,15 @@ class DedupRegistry:
                 if reason:
                     conflicts.append(reason)
         if conflicts:
-            return self._reject(sorted(conflicts)[0])
+            reason = sorted(conflicts)[0]
+            return self._reject(reason) if record_reject else AcceptDecision(False, reason)
 
+        if visual_sha256:
+            self.db.execute(
+                "INSERT OR IGNORE INTO evaluation_visual_owners"
+                "(visual_sha256,data_tier,text_sha256,split,priority,sample_id) VALUES(?,?,?,?,?,?)",
+                (visual_sha256, data_tier, text_sha256, split, priority, sample_id),
+            )
         if task in _LINE_TASKS:
             self.db.execute(
                 "INSERT OR IGNORE INTO evaluation_text_owners"
@@ -278,29 +342,32 @@ class DedupRegistry:
         sample_id: str,
         page_key: str = "",
         data_tier: str = "gold",
+        sample_origin: str = "unknown",
+        record_reject: bool = False,
     ) -> AcceptDecision:
         """Reserve evaluation ownership before train ingestion.
 
-        This compatibility entry point intentionally does not insert a sample row: it
-        only establishes the evaluation ownership barriers used by ``accept_sample``.
-        ``visual_sha256`` is accepted for API compatibility; visual ownership is
-        established only once a complete sample is accepted, because a reservation
-        without image bytes cannot safely prove a visual identity.
+        This compatibility entry point intentionally does not insert a sample row.
+        It establishes text, visual, writer, document and page ownership barriers
+        used by ``accept_sample``. The caller must provide identities recomputed from
+        a fully decoded and validated source row.
         """
-        del visual_sha256
         if not self.is_evaluation_split(split):
             raise ValueError("evaluation reservation requires a non-train split")
+        del sample_origin  # split already encodes human/real versus synthetic evaluation.
         priority = sample_priority(split, data_tier)
         decision = self._reserve_evaluation_owners(
             split=split,
             priority=priority,
             task=task,
             text_sha256=text_sha256,
+            visual_sha256=visual_sha256,
             writer_key=writer_key,
             document_key=document_key,
             page_key=page_key,
             sample_id=sample_id,
             data_tier=data_tier,
+            record_reject=record_reject,
         )
         self._maybe_commit()
         return decision or AcceptDecision(True, "reserved")
@@ -323,6 +390,12 @@ class DedupRegistry:
         sample_origin: str = "unknown",
     ) -> AcceptDecision:
         priority = sample_priority(split, data_tier)
+        reserved_visual_reason = self._check_evaluation_visual_owner(
+            visual_sha256=visual_sha256, text_sha256=text_sha256, split=split,
+            priority=priority, data_tier=data_tier,
+        )
+        if reserved_visual_reason:
+            return self._reject(reserved_visual_reason)
         if self.db.execute("SELECT 1 FROM samples WHERE sample_id=?", (sample_id,)).fetchone():
             return self._reject("duplicate_sample_id")
 
@@ -396,7 +469,8 @@ class DedupRegistry:
                     raise RegistryConflict(f"higher-priority evaluation {kind} arrived after train")
             owner_decision = self._reserve_evaluation_owners(
                 split=split, priority=priority, task=task, text_sha256=text_sha256,
-                writer_key=writer_key, document_key=document_key, page_key=page_key,
+                visual_sha256=visual_sha256, writer_key=writer_key,
+                document_key=document_key, page_key=page_key,
                 sample_id=sample_id, data_tier=data_tier,
             )
             if owner_decision is not None:

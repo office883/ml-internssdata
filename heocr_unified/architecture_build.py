@@ -138,6 +138,8 @@ def process_architecture_chunk(
                     document_key=row["source_document"],
                     source_key=source_key,
                     text_cap=int(config["text_variant_caps"]["architecture"]),
+                    data_tier="gold",
+                    sample_origin="synthetic",
                 )
                 if decision.accepted:
                     writer.add(row)

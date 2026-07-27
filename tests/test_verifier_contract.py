@@ -6,7 +6,9 @@ from PIL import Image
 import pytest
 
 from heocr_unified.ingest import make_sample_row
-from heocr_unified.verifier import VerificationError, validate_row
+from heocr_unified.verifier import (
+    VerificationError, validate_row, verify_evaluation_reservations, verify_pointed_audit,
+)
 
 
 def _row() -> dict:
@@ -58,3 +60,61 @@ def test_validate_row_accepts_explicit_quarantine_but_not_bad_provenance_contrac
     row["label_trust"] = "gold"
     with pytest.raises(VerificationError, match="label trust"):
         validate_row(row, source_revisions={row["source_repo"]: row["source_revision"]})
+
+
+def test_verify_pointed_audit_binds_manifest_inventory_and_fingerprint(tmp_path: Path) -> None:
+    audit = {
+        "status": "PASS",
+        "manifest_rows": 10,
+        "matching_rows": 8,
+        "eligible_occurrences": 6,
+        "canonical_texts": 5,
+        "duplicate_occurrences": 1,
+        "by_split": {"train": 3, "validation_synthetic": 1, "test_synthetic": 1},
+        "source_revision": "c" * 40,
+        "manifest_sha256": "d" * 64,
+        "policy": "test_synthetic>validation_synthetic>train",
+        "trusted_datasets": ["samaritan-ai/hebrew_synth_lines"],
+        "trusted_licenses": ["mit"],
+        "max_graphemes": 160,
+        "entries_fingerprint": "f" * 64,
+    }
+    payload = json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    audit["fingerprint"] = __import__("hashlib").sha256(payload.encode()).hexdigest()
+    (tmp_path / "VERIFIED_POINTED_AUDIT.json").write_text(json.dumps(audit), encoding="utf-8")
+    (tmp_path / "SOURCE_INVENTORY.json").write_text(json.dumps({
+        "verified_pointed": {
+            "repo_id": "ssdataanalysis/hebrew-ocr-corpus",
+            "revision": "c" * 40,
+            "path": "manifests/strict_all.jsonl.gz",
+            "sha256": "d" * 64,
+        }
+    }), encoding="utf-8")
+    config = {
+        "pointed_manifest_path": "manifests/strict_all.jsonl.gz",
+        "pointed_max_graphemes": 160,
+        "sources": {"ocr": {"repo_id": "ssdataanalysis/hebrew-ocr-corpus", "revision": "c" * 40}},
+        "acceptance": {"minimum_pointed_canonical_texts": 5},
+    }
+    checked = verify_pointed_audit(tmp_path, config=config)
+    assert checked["canonical_texts"] == 5
+
+    audit["manifest_sha256"] = "e" * 64
+    (tmp_path / "VERIFIED_POINTED_AUDIT.json").write_text(json.dumps(audit), encoding="utf-8")
+    with pytest.raises(VerificationError, match="manifest SHA"):
+        verify_pointed_audit(tmp_path, config=config)
+
+
+def test_verify_evaluation_reservations_requires_complete_accounting(tmp_path: Path) -> None:
+    report = {
+        "status": "PASS", "candidates": 7, "reserved": 5, "rejected": 2,
+        "visual_candidates": 4, "generated_candidates": 3,
+        "rejects": {"evaluation_text_owned_by_test": 2},
+        "fingerprint": "a" * 64,
+    }
+    (tmp_path / "EVALUATION_RESERVATIONS.json").write_text(json.dumps(report), encoding="utf-8")
+    assert verify_evaluation_reservations(tmp_path)["reserved"] == 5
+    report["candidates"] = 8
+    (tmp_path / "EVALUATION_RESERVATIONS.json").write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(VerificationError, match="accounting"):
+        verify_evaluation_reservations(tmp_path)

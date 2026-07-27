@@ -152,3 +152,35 @@ def test_architecture_ledger_rejects_changed_replay(tmp_path: Path) -> None:
     reg.record_architecture_segment(**kwargs)
     with pytest.raises(RegistryConflict, match="architecture ledger conflict"):
         reg.record_architecture_segment(**{**kwargs, "outcome": "rejected"})
+
+
+def test_evaluation_visual_reservation_blocks_later_train_even_for_word_task(tmp_path: Path) -> None:
+    reg = DedupRegistry(tmp_path / "r.sqlite", build_fingerprint="fp")
+    reg.reserve_evaluation_entity(
+        split="test", task="word_recognition", text_sha256="word-a",
+        visual_sha256="visual-same", writer_key="", document_key="",
+        sample_id="eval-word", data_tier="gold",
+    )
+    decision = reg.accept_sample(
+        sample_id="train-word", split="train", task="word_recognition",
+        byte_sha256="bytes", visual_sha256="visual-same", text_sha256="word-a",
+        writer_key="", document_key="", source_key="train", text_cap=100,
+        data_tier="gold", sample_origin="synthetic",
+    )
+    assert not decision.accepted
+    assert decision.reason == "train_visual_reserved_by_evaluation"
+
+
+def test_evaluation_visual_reservation_rejects_conflicting_label(tmp_path: Path) -> None:
+    reg = DedupRegistry(tmp_path / "r.sqlite", build_fingerprint="fp")
+    reg.reserve_evaluation_entity(
+        split="test", task="word_recognition", text_sha256="word-a",
+        visual_sha256="visual-same", writer_key="", document_key="",
+        sample_id="eval-a", data_tier="gold",
+    )
+    with pytest.raises(RegistryConflict, match="visual-label"):
+        reg.reserve_evaluation_entity(
+            split="validation", task="word_recognition", text_sha256="word-b",
+            visual_sha256="visual-same", writer_key="", document_key="",
+            sample_id="eval-b", data_tier="gold",
+        )
