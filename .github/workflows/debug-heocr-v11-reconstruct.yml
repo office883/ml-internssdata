@@ -1,0 +1,79 @@
+name: Debug Hebrew OCR v11 reconstruction
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-reconstruct-trigger/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      V9_RUN_ID: '30280897728'
+      V9_ARTIFACT: heocr-v9-source-verified
+      V9_TREE_SHA: 4cb1de7bcf997060581ed3093dcd89ad25f71cc7
+      V11_REF: tmp/heocr-v11-release-20260727
+      V11_PATCH_GZ_SHA256: fb32a8888ffa86509df5435a8caabb638e79471266a336f98d94c02354bdd0b0
+      V11_PATCH_SHA256: d3205a954a26c9756012ea59b60c0b5deecded975c6739c4b7f4da06bd1a7e97
+      V11_TREE_SHA: 1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a
+    steps:
+      - name: Diagnose every reconstruction boundary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          root=/tmp/heocr-v11-debug
+          rm -rf "$root"
+          mkdir -p "$root/v9-artifact" "$root/v11-parts" "$root/source"
+          gh run download "$V9_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$V9_ARTIFACT" --dir "$root/v9-artifact"
+          find "$root/v9-artifact" -maxdepth 3 -type f -printf '%p %s\n' | sort
+          test -f "$root/v9-artifact/hebrew_ocr_unified_builder_v9.tar.gz"
+          gzip -t "$root/v9-artifact/hebrew_ocr_unified_builder_v9.tar.gz"
+          tar -xzf "$root/v9-artifact/hebrew_ocr_unified_builder_v9.tar.gz" -C "$root/source" --strip-components=1
+          find "$root/source" -type f | wc -l
+          cat "$root/source/SOURCE_COMMIT.txt"
+
+          fetch_part() {
+            local name="$1" size="$2" sha="$3"
+            gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${V11_REF}" --jq '.content' \
+              | tr -d '\n' | base64 --decode > "$root/v11-parts/${name}"
+            actual_size="$(wc -c < "$root/v11-parts/${name}")"
+            actual_sha="$(sha256sum "$root/v11-parts/${name}" | awk '{print $1}')"
+            echo "PART ${name} size=${actual_size}/${size} sha=${actual_sha}/${sha}"
+            test "$actual_size" -eq "$size"
+            test "$actual_sha" = "$sha"
+          }
+          fetch_part part-000.b64 12000 b643cd6ab072320b6b011b273f8df04ef822156c0ba7c53c7d15f054c4a37a2f
+          fetch_part part-001.b64 12000 f008ca4c97af1c53ca74b37e0f1e0de80fe5ec866ec5e7508d921c582d6c989a
+          fetch_part part-002.b64 7316 1700a881a2ff7f302bf80a0e2f3223f69752479f349428a2e755d7a0dd6a601d
+          cat "$root"/v11-parts/part-*.b64 | tr -d '\n\r\t ' | base64 --decode > "$root/v9-to-v11.patch.gz"
+          echo "PATCH_GZ $(wc -c < "$root/v9-to-v11.patch.gz") $(sha256sum "$root/v9-to-v11.patch.gz" | awk '{print $1}')"
+          test "$(sha256sum "$root/v9-to-v11.patch.gz" | awk '{print $1}')" = "$V11_PATCH_GZ_SHA256"
+          gzip -t "$root/v9-to-v11.patch.gz"
+          gzip -dc "$root/v9-to-v11.patch.gz" > "$root/v9-to-v11.patch"
+          echo "PATCH $(wc -c < "$root/v9-to-v11.patch") $(sha256sum "$root/v9-to-v11.patch" | awk '{print $1}')"
+          test "$(sha256sum "$root/v9-to-v11.patch" | awk '{print $1}')" = "$V11_PATCH_SHA256"
+
+          cd "$root/source"
+          printf '$Format:%%H$\n' > SOURCE_COMMIT.txt
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__ .pytest_cache
+          git init
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A
+          git commit -m baseline
+          actual_v9="$(git rev-parse 'HEAD^{tree}')"
+          echo "V9_TREE actual=${actual_v9} expected=${V9_TREE_SHA}"
+          test "$actual_v9" = "$V9_TREE_SHA"
+          git am "$root/v9-to-v11.patch"
+          actual_v11="$(git rev-parse 'HEAD^{tree}')"
+          echo "V11_TREE actual=${actual_v11} expected=${V11_TREE_SHA}"
+          test "$actual_v11" = "$V11_TREE_SHA"
+          test -z "$(git status --porcelain)"
+          echo HEOCR_V11_RECONSTRUCTION_PASS
