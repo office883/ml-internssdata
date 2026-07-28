@@ -1,0 +1,61 @@
+name: Export Hebrew OCR v11 patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-heocr-v11-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REF: tmp/heocr-v11-release-20260727
+      EXPECTED_GZ_SHA256: fb32a8888ffa86509df5435a8caabb638e79471266a336f98d94c02354bdd0b0
+      EXPECTED_PATCH_SHA256: d3205a954a26c9756012ea59b60c0b5deecded975c6739c4b7f4da06bd1a7e97
+    steps:
+      - name: Fetch, reconstruct, and verify patch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v11-patch-export
+          rm -rf "$root"
+          mkdir -p "$root/parts"
+
+          fetch_part() {
+            local name="$1" expected_size="$2" expected_sha="$3"
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v11-patch/${name}?ref=${SOURCE_REF}" \
+              --jq '.content' \
+              | tr -d '\n' \
+              | base64 --decode > "$root/parts/${name}"
+            test "$(wc -c < "$root/parts/${name}")" -eq "$expected_size"
+            echo "$expected_sha  $root/parts/${name}" | sha256sum --check --status
+          }
+
+          fetch_part part-000.b64 12000 b643cd6ab072320b6b011b273f8df04ef822156c0ba7c53c7d15f054c4a37a2f
+          fetch_part part-001.b64 12000 f008ca4c97af1c53ca74b37e0f1e0de80fe5ec866ec5e7508d921c582d6c989a
+          fetch_part part-002.b64 7316 1700a881a2ff7f302bf80a0e2f3223f69752479f349428a2e755d7a0dd6a601d
+
+          cat "$root"/parts/part-*.b64 | tr -d '\n\r\t ' | base64 --decode > "$root/v9-to-v11.patch.gz"
+          echo "$EXPECTED_GZ_SHA256  $root/v9-to-v11.patch.gz" | sha256sum --check --status
+          gzip --test "$root/v9-to-v11.patch.gz"
+          gzip --decompress --stdout "$root/v9-to-v11.patch.gz" > "$root/v9-to-v11.patch"
+          echo "$EXPECTED_PATCH_SHA256  $root/v9-to-v11.patch" | sha256sum --check --status
+          sha256sum "$root"/parts/* "$root/v9-to-v11.patch.gz" "$root/v9-to-v11.patch" > "$root/SHA256SUMS.txt"
+          printf 'source_ref=%s\n' "$SOURCE_REF" > "$root/PROVENANCE.txt"
+          echo HEOCR_V11_PATCH_EXPORT_PASS
+
+      - name: Upload verified patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v11-patch-verified
+          path: /tmp/heocr-v11-patch-export
+          if-no-files-found: error
+          retention-days: 1
