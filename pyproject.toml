@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hebrew-ocr-unified-builder"
+version = "9.0.0"
+description = "Fail-closed builder for a unified Hebrew OCR/HTR dataset"
+requires-python = ">=3.11"
+dependencies = [
+  "huggingface-hub==1.24.0",
+  "pyarrow==21.0.0",
+  "Pillow==12.2.0",
+  "numpy==2.3.5",
+  "opencv-python-headless==4.13.0.92",
+  "fonttools==4.63.0",
+  "regex==2026.5.9",
+  "pandas==2.2.3",
+]
+
+[project.scripts]
+heocr-unified = "heocr_unified.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["heocr_unified*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]
