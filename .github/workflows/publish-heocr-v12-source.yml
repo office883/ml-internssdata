@@ -1,0 +1,94 @@
+name: Publish verified Hebrew OCR v12 source branch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-heocr-v12-source.yml'
+  pull_request:
+    paths:
+      - 'tmp/heocr-v12-source-publish-trigger/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      V11_BRANCH: heocr-v11-source-verified
+      V11_TREE_SHA: 1255d75e96eaa8c2fcdfb51fea2e88d96e07d06a
+      PATCH_REF: tmp/heocr-v12-patch-20260728
+      PATCH_GZ_SHA256: d81c23f32a607e21374a5820fba59993abcdd4e0becd91a28c62c6f43a9c3fb3
+      PATCH_SHA256: 09f890d2dc44b6d5e8c84a3a0aa185c42da45c0129288449b2578013ffd7ac09
+      V12_TREE_SHA: 1b26ed9562c6c4b18b64952983d82d8a08c6a825
+      TARGET_BRANCH: heocr-v12-source-verified
+    steps:
+      - name: Reconstruct exact v12 source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v12-publish
+          rm -rf "$root"
+          mkdir -p "$root/parts"
+          git clone --depth 1 --branch "$V11_BRANCH" "https://github.com/${GITHUB_REPOSITORY}.git" "$root/source"
+          cd "$root/source"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V11_TREE_SHA"
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+
+          fetch_part() {
+            local name="$1" expected_size="$2" expected_sha="$3"
+            gh api -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v12-patch/${name}?ref=${PATCH_REF}" \
+              --jq '.content' | tr -d '\n' | base64 --decode > "$root/parts/${name}"
+            test "$(wc -c < "$root/parts/${name}")" -eq "$expected_size"
+            echo "$expected_sha  $root/parts/${name}" | sha256sum --check --status
+          }
+          fetch_part part-000.b64 12000 98fbdb4456a4e626eb4382caa7273963b7d7b9e656e5224dbf3bcd411575ca5a
+          fetch_part part-001.b64 12000 b3ed1da4c6c4dcece2deda648fdc436e68fa045af51a186778ab7b23c7d018da
+          fetch_part part-002.b64 9512 4df36ca9661e1021e86be050fdfb692e7f0a4578f1d8ae6f2985294b37d5f7ac
+
+          cat "$root"/parts/part-*.b64 | tr -d '\n\r\t ' | base64 --decode > "$root/v11-to-v12.patch.gz"
+          echo "$PATCH_GZ_SHA256  $root/v11-to-v12.patch.gz" | sha256sum --check --status
+          gzip --test "$root/v11-to-v12.patch.gz"
+          gzip --decompress --stdout "$root/v11-to-v12.patch.gz" > "$root/v11-to-v12.patch"
+          echo "$PATCH_SHA256  $root/v11-to-v12.patch" | sha256sum --check --status
+
+          git am "$root/v11-to-v12.patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V12_TREE_SHA"
+          test -z "$(git status --porcelain)"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          echo "PUBLISHED_COMMIT=$(git rev-parse HEAD)"
+          echo "PUBLISHED_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Build deterministic source archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v12-publish
+          cd "$root/source"
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v12/ -o "$root/hebrew_ocr_unified_builder_v12.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v12/ -o "$root/hebrew_ocr_unified_builder_v12.zip" HEAD
+          sha256sum "$root/hebrew_ocr_unified_builder_v12.tar.gz" "$root/hebrew_ocr_unified_builder_v12.zip" > "$root/SHA256SUMS.txt"
+          git rev-parse HEAD > "$root/SOURCE_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/SOURCE_TREE.txt"
+          tar --list --gzip --file "$root/hebrew_ocr_unified_builder_v12.tar.gz" > "$root/SOURCE_CONTENTS.txt"
+
+      - name: Upload verified source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v12-source-published
+          path: |
+            /tmp/heocr-v12-publish/hebrew_ocr_unified_builder_v12.tar.gz
+            /tmp/heocr-v12-publish/hebrew_ocr_unified_builder_v12.zip
+            /tmp/heocr-v12-publish/SHA256SUMS.txt
+            /tmp/heocr-v12-publish/SOURCE_COMMIT.txt
+            /tmp/heocr-v12-publish/SOURCE_TREE.txt
+            /tmp/heocr-v12-publish/SOURCE_CONTENTS.txt
+          if-no-files-found: error
+          retention-days: 1
