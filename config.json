@@ -1,9 +1,9 @@
 {
-  "builder_version": "11.0.0",
+  "builder_version": "12.0.0",
   "output_repo": "ssdataanalysis/hebrew-ocr-unified-sota-v1",
-  "work_dir": "~/hebrew-ocr-unified-work-v11",
+  "work_dir": "~/hebrew-ocr-unified-work-v12",
   "upload": true,
   "private": true,
   "deep_remote_verify": true,
-  "minimum_free_gib": 120
+  "minimum_free_gib": 200
 }

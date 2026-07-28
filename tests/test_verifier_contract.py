@@ -118,3 +118,43 @@ def test_verify_evaluation_reservations_requires_complete_accounting(tmp_path: P
     (tmp_path / "EVALUATION_RESERVATIONS.json").write_text(json.dumps(report), encoding="utf-8")
     with pytest.raises(VerificationError, match="accounting"):
         verify_evaluation_reservations(tmp_path)
+
+
+def test_validate_row_rejects_samaritan_script_inside_gold() -> None:
+    row = _row()
+    row.update({
+        "modality": "historical_samaritan_handwritten_line",
+        "sample_origin": "real",
+        "is_synthetic": False,
+        "label_source": "source_transcription",
+        "provenance_reason": "known_real_source",
+        "source_repo": "ssdataanalysis/hebrew-ocr-corpus",
+        "source_revision": "c" * 40,
+        "source_path": "webdataset/historical_handwriting_lines/train/a.tar",
+        "provenance_json": json.dumps({
+            "source_metadata": {"source_dataset": "johnlockejrr/samaritan_v1"}
+        }),
+    })
+    with pytest.raises(VerificationError, match="Samaritan script"):
+        validate_row(row, source_revisions={row["source_repo"]: row["source_revision"]})
+
+
+def test_validate_row_allows_samaritan_script_in_extended_opt_in() -> None:
+    row = _row()
+    row.update({
+        "modality": "historical_samaritan_lightonocr_line",
+        "data_tier": "extended",
+        "label_trust": "extended",
+        "sample_origin": "real",
+        "is_synthetic": False,
+        "label_source": "source_transcription",
+        "provenance_reason": "samaritan_script_opt_in_only",
+        "recommended_sampling_weight": 0.35,
+        "source_repo": "ssdataanalysis/hebrew-ocr-corpus",
+        "source_revision": "c" * 40,
+        "source_path": "webdataset/historical_handwriting_lines/train/a.tar",
+        "provenance_json": json.dumps({
+            "source_metadata": {"source_dataset": "samaritan-ai/samaritan_hebrew_LightOnOcr"}
+        }),
+    })
+    validate_row(row, source_revisions={row["source_repo"]: row["source_revision"]})

@@ -61,3 +61,34 @@ def test_quarantine_constructor_forces_zero_training_weight() -> None:
         recommended_sampling_weight=0.0,
     )
     assert row["recommended_sampling_weight"] == 0.0
+
+
+def test_htr_sample_identity_is_namespaced_by_repo_file_and_row() -> None:
+    from heocr_unified.ingest import _htr_sample_id
+    a = _htr_sample_id("repo/a", "stage/train-000.parquet", "same", 7)
+    b = _htr_sample_id("repo/a", "stage/train-001.parquet", "same", 7)
+    c = _htr_sample_id("repo/a", "stage/train-000.parquet", "same", 8)
+    assert a != b != c
+    assert a.startswith("htr-")
+
+
+def test_htr_provenance_retains_upstream_source_chain() -> None:
+    from heocr_unified.ingest import _htr_provenance
+    metadata = {
+        "source_repo": "upstream/repo",
+        "source_revision": "b" * 40,
+        "source_split": "test",
+        "source_file": "data/test.parquet",
+        "source_row_index": 41,
+        "text_group_id": "group-17",
+        "human_source": "matan_primary",
+    }
+    provenance = _htr_provenance(metadata, curated_row_index=9, classification="curated_human_htr")
+    assert provenance["curated_row_index"] == 9
+    assert provenance["upstream_source_repo"] == "upstream/repo"
+    assert provenance["upstream_source_revision"] == "b" * 40
+    assert provenance["upstream_source_split"] == "test"
+    assert provenance["upstream_source_file"] == "data/test.parquet"
+    assert provenance["upstream_source_row_index"] == 41
+    assert provenance["text_group_id"] == "group-17"
+    assert provenance["human_source"] == "matan_primary"

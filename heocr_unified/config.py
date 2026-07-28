@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,7 +14,7 @@ from . import __version__
 DEFAULT_CONFIG: dict[str, Any] = {
     "builder_version": __version__,
     "output_repo": "ssdataanalysis/hebrew-ocr-unified-sota-v1",
-    "work_dir": str(Path.home() / "hebrew-ocr-unified-work-v11"),
+    "work_dir": str(Path.home() / "hebrew-ocr-unified-work-v12"),
     "upload": True,
     "private": True,
     "deep_remote_verify": True,
@@ -22,9 +24,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "structured_chunk_size": 2500,
     "page_chunk_size": 100,
     "page_pool_limit": 200000,
-    "minimum_free_gib": 120,
+    "minimum_free_gib": 200,
     "architecture_extra_variant_rate": 0.22,
-    "architecture_structured_lines": 120000,
+    "architecture_structured_lines": 300000,
     "architecture_pages": 6000,
     "architecture_max_graphemes": 112,
     "pointed_manifest_path": "manifests/strict_all.jsonl.gz",
@@ -45,6 +47,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "ofl/notosanshebrew",
             "ofl/notoserifhebrew",
             "ofl/notorashihebrew",
+            "ofl/miriamlibre",
+            "ofl/varelaround",
+            "ofl/secularone",
+            "ofl/suezone",
+            "ofl/bellefair",
+            "ofl/amaticsc",
         ],
     },
     "sources": {
@@ -81,7 +89,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "minimum_human_validation": 500,
         "minimum_human_test": 900,
         "minimum_architecture_natural_lines": 950000,
-        "minimum_architecture_structured_lines": 100000,
+        "minimum_architecture_extra_variants": 150000,
+        "minimum_architecture_structured_lines": 250000,
         "minimum_pages": 5000,
         "minimum_mixed_bidi": 100000,
         "minimum_with_digits": 250000,
@@ -153,15 +162,92 @@ def load_config(path: str | Path | None, *, overrides: Mapping[str, Any] | None 
 def validate_config(config: Mapping[str, Any]) -> None:
     if config.get("builder_version") != __version__:
         raise ValueError("builder_version must match package version")
-    for name, source in config["sources"].items():
+
+    output_repo = str(config.get("output_repo") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", output_repo):
+        raise ValueError("output_repo must be in owner/name form")
+    if config.get("private") is not True:
+        raise ValueError("private must be true; this builder refuses public OCR releases")
+    for key in ("upload", "deep_remote_verify"):
+        if not isinstance(config.get(key), bool):
+            raise ValueError(f"{key} must be boolean")
+
+    sources = config.get("sources")
+    if not isinstance(sources, Mapping) or set(sources) != {"foundation", "htr", "ocr", "architecture"}:
+        raise ValueError("sources must define exactly foundation, htr, ocr, and architecture")
+    for name, source in sources.items():
+        if not isinstance(source, Mapping):
+            raise ValueError(f"source {name} must be an object")
+        repo_id = str(source.get("repo_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", repo_id):
+            raise ValueError(f"source {name} repo_id must be in owner/name form")
         revision = str(source.get("revision", ""))
         if len(revision) != 40 or any(ch not in "0123456789abcdef" for ch in revision):
             raise ValueError(f"source {name} is not pinned to a 40-character commit")
-    font_revision = str(config["font_repo"]["revision"])
-    if len(font_revision) != 40:
-        raise ValueError("font repo must be pinned")
-    if int(config["rows_per_shard"]) < 1:
-        raise ValueError("rows_per_shard must be positive")
+
+    font_repo = config.get("font_repo")
+    if not isinstance(font_repo, Mapping):
+        raise ValueError("font_repo must be an object")
+    font_revision = str(font_repo.get("revision") or "")
+    if len(font_revision) != 40 or any(ch not in "0123456789abcdef" for ch in font_revision):
+        raise ValueError("font repo must be pinned to a lowercase 40-character commit")
+    font_url = str(font_repo.get("url") or "")
+    if not font_url.startswith("https://"):
+        raise ValueError("font_repo.url must use https")
+    font_paths = font_repo.get("paths")
+    if not isinstance(font_paths, list) or not font_paths:
+        raise ValueError("font_repo.paths must be a non-empty list")
+    normalized_paths: list[str] = []
+    for value in font_paths:
+        path = str(value or "")
+        parts = path.split("/")
+        if not path or path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("font_repo.paths must contain safe relative repository paths")
+        normalized_paths.append(path)
+    if len(set(normalized_paths)) != len(normalized_paths):
+        raise ValueError("font_repo.paths must be unique")
+
+    positive_integer_keys = (
+        "rows_per_shard", "page_rows_per_shard", "architecture_chunk_size",
+        "structured_chunk_size", "page_chunk_size", "page_pool_limit",
+        "architecture_structured_lines", "architecture_pages",
+        "architecture_max_graphemes", "pointed_variants_per_text",
+        "pointed_chunk_size", "pointed_mini_per_split", "pointed_max_graphemes",
+    )
+    for key in positive_integer_keys:
+        value = config.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{key} must be a positive integer")
+    free_gib = config.get("minimum_free_gib")
+    if isinstance(free_gib, bool):
+        raise ValueError("minimum_free_gib must be a finite non-negative number")
+    try:
+        free_gib_value = float(free_gib)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("minimum_free_gib must be a finite non-negative number") from exc
+    if not math.isfinite(free_gib_value) or free_gib_value < 0:
+        raise ValueError("minimum_free_gib must be a finite non-negative number")
+
+    try:
+        extra_variant_rate = float(config["architecture_extra_variant_rate"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("architecture_extra_variant_rate must be a probability") from exc
+    if not math.isfinite(extra_variant_rate) or not 0.0 <= extra_variant_rate <= 1.0:
+        raise ValueError("architecture_extra_variant_rate must be between 0 and 1")
+
+    acceptance = config.get("acceptance")
+    if not isinstance(acceptance, Mapping) or not acceptance:
+        raise ValueError("acceptance must be a non-empty object")
+    for key, value in acceptance.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"acceptance.{key} must be a positive integer")
+    caps = config.get("text_variant_caps")
+    if not isinstance(caps, Mapping) or not caps:
+        raise ValueError("text_variant_caps must be a non-empty object")
+    for key, value in caps.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"text_variant_caps.{key} must be a positive integer")
+
     code_digest = str(config.get("builder_code_sha256", ""))
     if len(code_digest) != 64 or any(ch not in "0123456789abcdef" for ch in code_digest):
         raise ValueError("builder_code_sha256 must be a lowercase SHA-256 digest")

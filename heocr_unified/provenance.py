@@ -17,18 +17,24 @@ class ProvenanceDecision:
     recommended_sampling_weight: float
 
 
-_REAL_DATASETS = {
-    "zenodo/pinkas_dataset",
+_SAMARITAN_DATASETS = {
     "johnlockejrr/samaritan_v1",
     "samaritan-ai/samaritan_hebrew_LightOnOcr",
+}
+
+_SAMARITAN_MODALITIES = {
+    "historical_samaritan_handwritten_line",
+    "historical_samaritan_lightonocr_line",
+}
+
+_REAL_DATASETS = {
+    "zenodo/pinkas_dataset",
     "sivan22/hebrew-handwritten-dataset",
 }
 
 _REAL_MODALITIES = {
     "handwriting_real_character",
     "historical_hebrew_handwritten_line",
-    "historical_samaritan_handwritten_line",
-    "historical_samaritan_lightonocr_line",
 }
 
 _SYNTHETIC_MODALITY_TOKENS = (
@@ -150,6 +156,29 @@ def classify_row_provenance(
     source_dataset = str(metadata.get("source_dataset") or "").strip()
     image_kind = str(metadata.get("image_kind") or "").strip().lower()
     quality = _quality(metadata)
+
+    # Samaritan-script images use Hebrew Unicode labels, but their glyph shapes are
+    # not ordinary square Hebrew. They are useful for opt-in historical research,
+    # yet must never silently teach the default Hebrew OCR model that Samaritan
+    # glyphs are modern Hebrew print or handwriting.
+    if source_dataset in _SAMARITAN_DATASETS or modality in _SAMARITAN_MODALITIES:
+        if quality in {"C", "Q"}:
+            return _decision(
+                is_synthetic=False,
+                data_tier="quarantine",
+                sample_origin="real",
+                label_source="source_transcription",
+                reason=f"samaritan_script_quality_{quality.lower()}",
+                weight=0.0,
+            )
+        return _decision(
+            is_synthetic=False,
+            data_tier="extended",
+            sample_origin="real",
+            label_source="source_transcription",
+            reason="samaritan_script_opt_in_only",
+            weight=0.35 if quality in {"A", "UNKNOWN"} else 0.25,
+        )
 
     known_real = source_dataset in _REAL_DATASETS or modality in _REAL_MODALITIES
     if known_real:

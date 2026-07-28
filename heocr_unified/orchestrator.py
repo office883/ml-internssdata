@@ -17,10 +17,10 @@ from .architecture import (
 from .architecture_build import process_architecture_chunk
 from .builder import process_source_rows
 from .config import build_fingerprint
-from .fonts import acquire_google_fonts, discover_fonts
+from .fonts import acquire_google_fonts, discover_fonts, pointed_coverage_families
 from .generated_build import generate_page_specs, render_page_row, render_structured_row
 from .identity import stable_token
-from .metadata import export_registry_metadata, write_dataset_card, write_json_atomic
+from .metadata import export_registry_metadata, write_dataset_card, write_json_atomic, write_usage_documents
 from .pipeline import iter_downloaded_task_rows, process_downloaded_task
 from .pointed import (
     POINTED_MANIFEST_PATH, POINTED_OUTPUT_CONFIG, PointedTextResolver,
@@ -76,7 +76,7 @@ def reserve_evaluation_candidates(
             raise ValueError("evaluation reservation candidate cannot be train")
         rows.append(dict(candidate))
     rows.sort(key=lambda row: (
-        sample_priority(str(row["split"]), str(row["data_tier"])),
+        sample_priority(str(row["split"]), str(row["data_tier"]), str(row["sample_origin"])),
         str(row["sample_id"]),
     ))
     rejects: collections.Counter[str] = collections.Counter()
@@ -185,11 +185,22 @@ def prepare_environment(config: dict[str, Any], paths: BuildPaths, *, token: str
         sparse_paths=list(font_cfg["paths"]),
     )
     fonts = discover_fonts([font_repo], include_system=False)
-    required = {"Alef", "Assistant", "Heebo", "Rubik", "David Libre", "Frank Ruhl Libre", "Noto Sans Hebrew", "Noto Serif Hebrew", "Noto Rashi Hebrew"}
+    required = {
+        "Alef", "Assistant", "Heebo", "Rubik", "David Libre",
+        "Frank Ruhl Libre", "Noto Sans Hebrew", "Noto Serif Hebrew",
+        "Noto Rashi Hebrew", "Miriam Libre", "Varela Round",
+        "Secular One", "Suez One", "Bellefair", "Amatic SC",
+    }
     families = {font.family for font in fonts}
     missing = required - families
     if missing:
         raise RuntimeError(f"required pinned font families missing: {sorted(missing)}")
+    full_pointed = pointed_coverage_families(fonts)
+    if len(full_pointed) < 3:
+        raise RuntimeError(
+            "at least three disjoint pinned font families must cover the complete "
+            f"pointed-Hebrew probe; found {sorted(full_pointed)}"
+        )
     renderer = TextRenderer(fonts)
     write_json_atomic(paths.output / "SOURCE_INVENTORY.json", inventory)
     write_json_atomic(paths.output / "FONT_MANIFEST.json", [
@@ -697,6 +708,7 @@ def run_local_build(config: dict[str, Any], *, mini: bool = False) -> tuple[Buil
         summary["architecture_page_reports"] = len(page_reports)
         summary["architecture_resolver"] = resolver_summary
         write_dataset_card(paths.output, summary)
+        write_usage_documents(paths.output, config=config)
         write_json_atomic(paths.output / "BUILD_SUMMARY.json", summary)
         return paths, summary
     finally:

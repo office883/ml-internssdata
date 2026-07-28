@@ -12,7 +12,8 @@ def _passing(config: dict) -> dict:
         "gold_rows":a["minimum_total_rows"], "gold_train_rows":a["minimum_train_rows"],
         "gold_recognition_lines":a["minimum_recognition_lines"], "gold_unique_texts":a["minimum_unique_texts"],
         "human_train":a["minimum_human_train"], "human_validation":a["minimum_human_validation"],
-        "human_test":a["minimum_human_test"], "architecture_natural_lines":a["minimum_architecture_natural_lines"],
+        "human_test":a["minimum_human_test"], "architecture_primary_lines":a["minimum_architecture_natural_lines"],
+        "architecture_extra_variants":a["minimum_architecture_extra_variants"],
         "architecture_structured_lines":a["minimum_architecture_structured_lines"],
         "pages":a["minimum_pages"], "mixed_bidi":a["minimum_mixed_bidi"],
         "with_digits":a["minimum_with_digits"], "with_combining_marks":a["minimum_with_combining_marks"],
@@ -36,7 +37,7 @@ def test_mini_acceptance_requires_all_contract_categories_not_full_volume() -> N
     summary={
         "gold_rows":100,"gold_train_rows":50,"gold_recognition_lines":70,"gold_unique_texts":50,
         "human_train":1,"human_validation":1,"human_test":1,
-        "architecture_natural_lines":1,"architecture_structured_lines":1,"pages":1,
+        "architecture_primary_lines":1,"architecture_extra_variants":1,"architecture_structured_lines":1,"pages":1,
         "mixed_bidi":1,"with_digits":1,"with_combining_marks":1,"verified_pointed_rerender":1,
         "architecture_gold_total":1,"architecture_gold_accounted":1,
         "leakage_errors":0,"integrity_errors":0,

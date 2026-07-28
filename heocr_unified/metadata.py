@@ -115,28 +115,51 @@ def write_dataset_card(output_root: str | Path, summary: dict[str, Any]) -> None
     pages = [name for name in base if name == "architecture_synthetic_pages"]
     special = set(words + characters + pages)
     line_configs = [name for name in base if name not in special]
-    extended = sorted(name for name in discovered if name.endswith("_extended"))
+    extended_all = sorted(name for name in discovered if name.endswith("_extended"))
+    extended_words = [name for name in extended_all if name.removesuffix("_extended") == "modern_print_words"]
+    extended_characters = [
+        name for name in extended_all
+        if name.removesuffix("_extended") == "handwriting_real_characters"
+    ]
+    extended_pages = [
+        name for name in extended_all
+        if name.removesuffix("_extended") == "architecture_synthetic_pages"
+    ]
+    extended_special = set(extended_words + extended_characters + extended_pages)
+    extended_lines = [name for name in extended_all if name not in extended_special]
     quarantine = sorted(name for name in discovered if name.endswith("_quarantine"))
 
     config_lines: list[str] = []
-    config_lines += _yaml_data_config(
+    declared_names: set[str] = set()
+
+    def declare(name: str, data_files: dict[str, list[str]], *, default: bool = False) -> None:
+        if name in declared_names or not data_files:
+            return
+        config_lines.extend(_yaml_data_config(name, data_files, default=default))
+        declared_names.add(name)
+
+    # Curated convenience views come first.  They make the safe/default training
+    # path obvious while preserving task boundaries between lines, words,
+    # characters, and pages.
+    declare(
         "unified_recognition_lines", _merge_config_patterns(discovered, line_configs), default=True
     )
-    config_lines += _yaml_data_config(
-        "modern_print_words", _merge_config_patterns(discovered, words)
-    )
-    config_lines += _yaml_data_config(
-        "handwriting_real_characters", _merge_config_patterns(discovered, characters)
-    )
-    config_lines += _yaml_data_config(
-        "document_pages", _merge_config_patterns(discovered, pages)
-    )
-    config_lines += _yaml_data_config(
-        "extended_recognition_lines", _merge_config_patterns(discovered, extended)
-    )
-    config_lines += _yaml_data_config(
-        "quarantine_audit", _merge_config_patterns(discovered, quarantine)
-    )
+    declare("modern_print_words", _merge_config_patterns(discovered, words))
+    declare("handwriting_real_characters", _merge_config_patterns(discovered, characters))
+    declare("document_pages", _merge_config_patterns(discovered, pages))
+    declare("extended_recognition_lines", _merge_config_patterns(discovered, extended_lines))
+    declare("extended_words", _merge_config_patterns(discovered, extended_words))
+    declare("extended_characters", _merge_config_patterns(discovered, extended_characters))
+    declare("extended_document_pages", _merge_config_patterns(discovered, extended_pages))
+    declare("quarantine_audit", _merge_config_patterns(discovered, quarantine))
+
+    # Also expose every physical config exactly once.  This is important for
+    # curriculum learning, per-domain benchmarking, and reproducible sampling:
+    # users can select a precise source family instead of being forced through a
+    # merged convenience view.  Names already used by a convenience config are
+    # intentionally not duplicated.
+    for name in sorted(discovered):
+        declare(name, discovered[name])
     if not config_lines:
         raise RuntimeError("cannot write dataset card before Parquet data exists")
 
@@ -147,7 +170,7 @@ def write_dataset_card(output_root: str | Path, summary: dict[str, Any]) -> None
         "license: other",
         "task_categories:",
         "- image-to-text",
-        "pretty_name: Hebrew OCR Unified SOTA-Capable v11",
+        "pretty_name: Hebrew OCR Unified SOTA-Capable v12",
         "tags:",
         "- ocr",
         "- htr",
@@ -167,7 +190,8 @@ def write_dataset_card(output_root: str | Path, summary: dict[str, Any]) -> None
 ## שכבות אמון
 
 - `unified_recognition_lines` הוא config ברירת המחדל ומכיל **gold בלבד**.
-- `extended_recognition_lines` הוא opt-in לחומר שימושי אך פחות ודאי, כגון diffusion או מקורות Tier B.
+- `extended_recognition_lines` הוא opt-in לשורות שימושיות אך פחות ודאיות, כגון diffusion או מקורות Tier B.
+- `extended_words`, `extended_characters` ו־`extended_document_pages` מבודדים פיזית; הם אינם יכולים להיכנס בטעות למסלול השורות.
 - `quarantine_audit` נשמר לביקורת ולמחקר בלבד; לכל שורה בו משקל אימון אפס והוא לעולם אינו נכלל בברירת המחדל.
 - דפי מסמך, מילים ותווים בודדים מופרדים ל־configs ייעודיים כדי למנוע ערבוב יחידות אימון.
 
@@ -191,3 +215,107 @@ def write_dataset_card(output_root: str | Path, summary: dict[str, Any]) -> None
 ```json
 """ + json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n```\n"
     (root / "README.md").write_text(card, encoding="utf-8")
+
+
+def write_usage_documents(output_root: str | Path, *, config: dict[str, Any]) -> None:
+    """Write source/licensing policy and an operationally safe training recipe."""
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    source_rows = []
+    for family, source in sorted(config["sources"].items()):
+        source_rows.append(
+            f"- `{family}` — `{source['repo_id']}` at commit `{source['revision']}`"
+        )
+    source_policy = """# Source and Trust Policy
+
+This private dataset card intentionally declares `license: other`. The unified
+repository does **not** relicense all upstream material under one blanket license.
+Every row retains its source repository, immutable revision, source path, trust
+tier, provenance classification, and any available upstream license metadata.
+
+## Pinned sources
+
+""" + "\n".join(source_rows) + """
+
+## Trust tiers
+
+- **gold**: human transcriptions or deterministic synthetic ground truth with
+  explicit provenance and successful integrity checks.
+- **extended**: opt-in material that may be useful but is not safe as the default,
+  including diffusion-generated handwriting, Tier-B material, and Samaritan-script
+  imagery whose labels use Hebrew Unicode but whose glyph shapes are not ordinary
+  square Hebrew.
+- **quarantine**: audit-only material with `recommended_sampling_weight = 0`.
+  It is never included in the default training configuration.
+
+## Architecture corpus
+
+Only text explicitly marked **Born digital** is accepted as gold ground truth for
+new rendering. Text extracted from scanned documents by an older OCR system is
+preserved in quarantine rather than being redrawn as if its OCR output were truth.
+Each Tier-A occurrence receives an explicit ledger outcome; nothing disappears
+silently.
+
+## Samaritan material
+
+Samaritan handwriting is isolated in `extended` configurations. It may be selected
+for specialised historical research, but it is excluded from the core Hebrew OCR
+training mixture to avoid teaching the model that Samaritan glyph forms are standard
+modern Hebrew glyphs.
+
+## Distribution and compliance
+
+Before sharing or commercial redistribution, review the per-row provenance and
+upstream terms. Keeping the repository private does not erase upstream obligations.
+"""
+    training_recipe = """# Training Recipe
+
+The repository is a single source of truth, but it deliberately exposes separate
+configs so incompatible learning units cannot be mixed by accident.
+
+## Recommended curriculum
+
+1. **Core line recognition pretraining** — train on `unified_recognition_lines`.
+   This is gold-only and is the default config.
+2. **Optional robustness expansion** — selectively add
+   `extended_recognition_lines`, respecting each row's
+   `recommended_sampling_weight`. Do not blindly use every extended sample at 1×.
+3. **Human HTR fine-tuning** — up-weight human handwriting train rows near the end
+   of training so they are not drowned by synthetic volume.
+4. **Keep human validation and human test locked**. Never use either for prompt
+   construction, tokenizer fitting, hard-negative generation, checkpoint selection
+   beyond the intended validation protocol, or language-model post-correction fitting.
+5. **Page training is a separate objective** — use `document_pages` for detection,
+   reading order, boxes, baselines, and full-page transcription. Do not mix page
+   images into a line recognizer without an explicit multi-task architecture.
+6. **Words and characters are separate tasks** — use `modern_print_words` and
+   `handwriting_real_characters` only with task-aware sampling/heads.
+7. `quarantine_audit` is not training data. Its rows carry zero weight by contract.
+
+## Suggested sampling
+
+- Start with task-balanced batches rather than proportional-to-row-count batches.
+- Preserve `recommended_sampling_weight` within each task/tier.
+- Cap repeated exact labels and avoid letting large synthetic families erase the
+  contribution of human data.
+- For modern Hebrew document OCR, begin without specialised Samaritan material;
+  add it only for a separately reported historical model or ablation.
+
+## Evaluation
+
+Report at least:
+
+- Grapheme-CER and codepoint CER;
+- WER where word segmentation is meaningful;
+- exact accuracy for numbers, dates, money, units, addresses, and identifiers;
+- mixed Hebrew/Latin/number BiDi accuracy;
+- niqqud/combining-mark accuracy;
+- separate modern print, historical print, handwriting, Rashi, page-layout, and
+  degradation buckets;
+- performance on the locked human validation/test sets.
+
+A state-of-the-art claim requires comparison against current baselines on frozen,
+source-disjoint test sets. Training loss or synthetic-test accuracy is not enough.
+"""
+    (root / "SOURCE_POLICY.md").write_text(source_policy, encoding="utf-8")
+    (root / "TRAINING_RECIPE.md").write_text(training_recipe, encoding="utf-8")

@@ -83,3 +83,45 @@ def test_foundation_is_synthetic_gold() -> None:
     assert decision.sample_origin == "synthetic"
     assert decision.label_source == "synthetic_ground_truth"
     assert decision.data_tier == "gold"
+
+
+def test_samaritan_handwriting_is_isolated_in_extended_not_gold() -> None:
+    task = _task("ocr", "webdataset/historical_handwriting_lines/train/a.tar")
+    for metadata in (
+        {
+            "modality": "historical_samaritan_handwritten_line",
+            "source_dataset": "johnlockejrr/samaritan_v1",
+            "image_kind": "materialized_online",
+            "quality_tier": "A",
+            "source_license": "mit",
+        },
+        {
+            "modality": "historical_samaritan_lightonocr_line",
+            "source_dataset": "samaritan-ai/samaritan_hebrew_LightOnOcr",
+            "image_kind": "materialized_online",
+            "quality_tier": "A",
+            "source_license": "cc-by-4.0",
+        },
+    ):
+        decision = classify_row_provenance(task, classify_source_task(task), metadata)
+        assert decision.sample_origin == "real"
+        assert decision.data_tier == "extended"
+        assert decision.is_synthetic is False
+        assert decision.reason == "samaritan_script_opt_in_only"
+        assert 0.0 < decision.recommended_sampling_weight < 1.0
+
+
+def test_hebrew_historical_handwriting_remains_gold_after_samaritan_isolation() -> None:
+    task = _task("ocr", "webdataset/historical_handwriting_lines/train/a.tar")
+    decision = classify_row_provenance(
+        task,
+        classify_source_task(task),
+        {
+            "modality": "historical_hebrew_handwritten_line",
+            "source_dataset": "zenodo/pinkas_dataset",
+            "image_kind": "materialized_online",
+            "quality_tier": "A",
+        },
+    )
+    assert decision.data_tier == "gold"
+    assert decision.reason == "known_real_source"

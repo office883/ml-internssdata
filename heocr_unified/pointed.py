@@ -339,7 +339,7 @@ def render_verified_pointed_row(
 ) -> dict[str, Any]:
     if variant < 0:
         raise ValueError("variant must be non-negative")
-    seed = _seed("verified-pointed-v11", entry.text_sha256, variant)
+    seed = _seed("verified-pointed-v12", entry.text_sha256, variant)
     profiles = _CLEAN_PROFILES if variant == 0 else _HARD_PROFILES
     profile = profiles[seed % len(profiles)]
     rendered = renderer.render_line(
@@ -388,7 +388,7 @@ def render_verified_pointed_row(
         font_sha256=rendered.font.sha256,
         augmentation=rendered.metadata,
         provenance={
-            "generator": "verified-pointed-v11",
+            "generator": "verified-pointed-v12",
             "manifest_path": _MANIFEST_PATH,
             "manifest_sha256": manifest_sha256,
             "source_line": entry.source_line,

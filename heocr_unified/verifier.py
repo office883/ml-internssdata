@@ -17,6 +17,16 @@ class VerificationError(RuntimeError):
     pass
 
 
+
+_SAMARITAN_DATASETS = {
+    "johnlockejrr/samaritan_v1",
+    "samaritan-ai/samaritan_hebrew_LightOnOcr",
+}
+_SAMARITAN_MODALITIES = {
+    "historical_samaritan_handwritten_line",
+    "historical_samaritan_lightonocr_line",
+}
+
 _REQUIRED = {
     "sample_id", "image", "text", "split", "task", "granularity", "modality",
     "data_tier", "is_synthetic", "sample_origin", "label_source", "label_trust",
@@ -190,7 +200,7 @@ def validate_verified_pointed_row(
     if str(row.get("source_path") or "") != "manifests/strict_all.jsonl.gz#biblical_pointed_lines":
         raise VerificationError("verified pointed row source path mismatch")
     provenance = _json_object(row.get("provenance_json"), field="provenance_json", expected=dict)
-    if str(provenance.get("generator") or "") != "verified-pointed-v11":
+    if str(provenance.get("generator") or "") != "verified-pointed-v12":
         raise VerificationError("verified pointed generator mismatch")
     if str(provenance.get("manifest_sha256") or "") != str(audit.get("manifest_sha256") or ""):
         raise VerificationError("verified pointed row manifest SHA mismatch")
@@ -267,7 +277,7 @@ def validate_row(row: Mapping[str, Any], *, source_revisions: Mapping[str, str])
 
     _json_object(row["augmentation_json"], field="augmentation_json", expected=dict)
     annotations = _json_object(row["annotations_json"], field="annotations_json", expected=list)
-    _json_object(row["provenance_json"], field="provenance_json", expected=dict)
+    provenance = _json_object(row["provenance_json"], field="provenance_json", expected=dict)
 
     split = str(row["split"])
     if split not in {"train", "validation", "test", "validation_synthetic", "test_synthetic"}:
@@ -288,6 +298,17 @@ def validate_row(row: Mapping[str, Any], *, source_revisions: Mapping[str, str])
         raise VerificationError("unknown provenance outside quarantine")
     if tier != "quarantine" and str(row["label_source"]) == "unknown":
         raise VerificationError("unknown label source outside quarantine")
+
+    source_metadata = provenance.get("source_metadata")
+    source_dataset = (
+        str(source_metadata.get("source_dataset") or "")
+        if isinstance(source_metadata, dict) else ""
+    )
+    modality = str(row.get("modality") or "")
+    if tier == "gold" and (
+        source_dataset in _SAMARITAN_DATASETS or modality in _SAMARITAN_MODALITIES
+    ):
+        raise VerificationError("Samaritan script is opt-in and cannot appear in gold")
     weight = float(row["recommended_sampling_weight"])
     if tier == "quarantine" and weight != 0.0:
         raise VerificationError("quarantine sampling weight must be exactly zero")
@@ -339,7 +360,8 @@ def enforce_acceptance(summary: Mapping[str, Any], *, config: Mapping[str, Any],
         "human_train": "minimum_human_train",
         "human_validation": "minimum_human_validation",
         "human_test": "minimum_human_test",
-        "architecture_natural_lines": "minimum_architecture_natural_lines",
+        "architecture_primary_lines": "minimum_architecture_natural_lines",
+        "architecture_extra_variants": "minimum_architecture_extra_variants",
         "architecture_structured_lines": "minimum_architecture_structured_lines",
         "pages": "minimum_pages",
         "mixed_bidi": "minimum_mixed_bidi",
@@ -630,6 +652,11 @@ def verify_output_dataset(
                         elif row["split"] == "test": counts["human_test"] += 1
                     if tier == "gold" and source_repo.endswith("hebrew-architecture-corpus") and str(row["source_path"]).startswith("txt/"):
                         counts["architecture_natural_lines"] += 1
+                        provenance = json.loads(str(row["provenance_json"]))
+                        if provenance.get("variant_role") == "extra_train":
+                            counts["architecture_extra_variants"] += 1
+                        elif provenance.get("variant_role") == "primary":
+                            counts["architecture_primary_lines"] += 1
                     if tier == "gold" and str(row["source_path"]) == "generated/structured-lines":
                         counts["architecture_structured_lines"] += 1
                     if tier == "gold" and row["task"] == "page_transcription": counts["pages"] += 1

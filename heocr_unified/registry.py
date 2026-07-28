@@ -27,6 +27,13 @@ _SPLIT_PRIORITY = {
     "train": 4,
 }
 _TIER_PRIORITY = {"gold": 0, "extended": 1, "quarantine": 2}
+_EVALUATION_ORIGIN_PRIORITY = {
+    "human": 0,
+    "real": 2,
+    "synthetic": 4,
+    "diffusion": 6,
+    "unknown": 8,
+}
 
 
 def split_priority(split: str) -> int:
@@ -36,12 +43,23 @@ def split_priority(split: str) -> int:
         raise ValueError(f"unknown split: {split}") from exc
 
 
-def sample_priority(split: str, data_tier: str) -> int:
+def sample_priority(split: str, data_tier: str, sample_origin: str = "unknown") -> int:
+    """Rank trust before split name: human val outranks lower-trust test data."""
     try:
         tier = _TIER_PRIORITY[str(data_tier)]
     except KeyError as exc:
         raise ValueError(f"unknown data tier: {data_tier}") from exc
-    return tier * 10 + split_priority(split)
+    split = str(split)
+    # Validate the split even though train is assigned outside the evaluation range.
+    split_priority(split)
+    if split == "train":
+        return tier * 100 + 50
+    try:
+        origin = _EVALUATION_ORIGIN_PRIORITY[str(sample_origin)]
+    except KeyError as exc:
+        raise ValueError(f"unknown sample origin: {sample_origin}") from exc
+    split_offset = 0 if split in {"test", "test_synthetic"} else 1
+    return tier * 100 + origin + split_offset
 
 
 def owner_scopes(data_tier: str) -> tuple[str, ...]:
@@ -354,8 +372,7 @@ class DedupRegistry:
         """
         if not self.is_evaluation_split(split):
             raise ValueError("evaluation reservation requires a non-train split")
-        del sample_origin  # split already encodes human/real versus synthetic evaluation.
-        priority = sample_priority(split, data_tier)
+        priority = sample_priority(split, data_tier, sample_origin)
         decision = self._reserve_evaluation_owners(
             split=split,
             priority=priority,
@@ -389,7 +406,7 @@ class DedupRegistry:
         data_tier: str = "gold",
         sample_origin: str = "unknown",
     ) -> AcceptDecision:
-        priority = sample_priority(split, data_tier)
+        priority = sample_priority(split, data_tier, sample_origin)
         reserved_visual_reason = self._check_evaluation_visual_owner(
             visual_sha256=visual_sha256, text_sha256=text_sha256, split=split,
             priority=priority, data_tier=data_tier,

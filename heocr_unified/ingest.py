@@ -156,6 +156,26 @@ def _first_text(metadata: dict[str, Any]) -> str:
     raise ValueError("source row has no text label")
 
 
+def _htr_sample_id(repo_id: str, source_path: str, source_id: str, curated_row_index: int) -> str:
+    return f"htr-{stable_token(repo_id, source_path, source_id, curated_row_index)}"
+
+
+def _htr_provenance(
+    metadata: dict[str, Any], *, curated_row_index: int, classification: str
+) -> dict[str, Any]:
+    return {
+        "curated_row_index": int(curated_row_index),
+        "upstream_source_repo": metadata.get("source_repo"),
+        "upstream_source_revision": metadata.get("source_revision"),
+        "upstream_source_split": metadata.get("source_split"),
+        "upstream_source_file": metadata.get("source_file"),
+        "upstream_source_row_index": metadata.get("source_row_index"),
+        "text_group_id": metadata.get("text_group_id"),
+        "human_source": metadata.get("human_source"),
+        "classification": classification,
+    }
+
+
 def iter_htr_parquet(
     path: str,
     *,
@@ -185,7 +205,7 @@ def iter_htr_parquet(
                 image_bytes=image_bytes,
                 image_path=image_path,
                 text=_first_text(metadata),
-                sample_id=f"htr-{source_id}",
+                sample_id=_htr_sample_id(task.repo_id, task.path, source_id, source_row),
                 split=mapped.output_split,
                 task=mapped.task,
                 granularity=mapped.granularity,
@@ -207,12 +227,9 @@ def iter_htr_parquet(
                 declared_image_sha256=str(metadata.get("image_sha256") or ""),
                 declared_width=metadata.get("width"),
                 declared_height=metadata.get("height"),
-                provenance={
-                    "source_row_index": source_row,
-                    "text_group_id": metadata.get("text_group_id"),
-                    "human_source": metadata.get("human_source"),
-                    "classification": decision.reason,
-                },
+                provenance=_htr_provenance(
+                    metadata, curated_row_index=source_row, classification=decision.reason
+                ),
                 recommended_sampling_weight=decision.recommended_sampling_weight,
             )
             produced += 1

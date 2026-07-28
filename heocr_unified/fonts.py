@@ -11,6 +11,17 @@ from typing import Iterable
 from fontTools.ttLib import TTFont, TTCollection
 
 
+
+
+# Minimum character inventory that each disjoint synthetic split must be able
+# to render with at least one pinned non-Rashi family.  It deliberately covers
+# modern Hebrew, digits, Hebrew punctuation, niqqud, meteg, and qamats qatan.
+POINTED_COVERAGE_CODEPOINTS = frozenset(
+    {ord(ch) for ch in "אבגדהוזחטיךכלםמןנסעףפץצקרשת0123456789-.,()׳״־׃"}
+    | set(range(0x05B0, 0x05BE))
+    | {0x05BF, 0x05C1, 0x05C2, 0x05C7}
+)
+
 @dataclass(frozen=True)
 class FontInfo:
     path: Path
@@ -146,13 +157,59 @@ def acquire_google_fonts(destination: str | Path, *, repo_url: str, revision: st
     return repo
 
 
+def pointed_coverage_families(fonts: list[FontInfo]) -> set[str]:
+    """Return non-Rashi families that cover the full pointed Hebrew probe."""
+    return {
+        font.family for font in fonts
+        if not font.is_rashi
+        and font.has_gpos
+        and POINTED_COVERAGE_CODEPOINTS.issubset(font.cmap)
+    }
+
+
 def split_font_families(fonts: list[FontInfo]) -> dict[str, list[FontInfo]]:
-    families = sorted({font.family for font in fonts if not font.is_rashi})
+    family_rows: dict[str, list[FontInfo]] = {}
+    for font in fonts:
+        if not font.is_rashi:
+            family_rows.setdefault(font.family, []).append(font)
+    families = sorted(
+        family_rows,
+        key=lambda family: hashlib.sha256(f"heocr-font-split-v12|{family}".encode()).hexdigest(),
+    )
     if len(families) < 3:
         return {"train": fonts, "validation_synthetic": fonts, "test_synthetic": fonts}
-    validation = set(families[-2:-1])
-    test = set(families[-1:])
+
+    # Hold out about 20% per synthetic evaluation split, capped at three
+    # families so the training pool remains broad even in small font sets.
+    holdout = max(1, min(3, len(families) // 5))
+    if len(families) - 2 * holdout < 1:
+        holdout = max(1, (len(families) - 1) // 2)
+
+    coverage_families = pointed_coverage_families(fonts)
+    full_coverage = [family for family in families if family in coverage_families]
+
+    validation: set[str] = set()
+    test: set[str] = set()
+    reserved_train: str | None = None
+    if len(full_coverage) >= 3:
+        # Reserve a complete Hebrew/niqqud family for every disjoint split.
+        # Without this, a hash-only split can assign a family lacking meteg or
+        # sof pasuq to an evaluation pool and make valid pointed labels
+        # impossible to render.
+        validation.add(full_coverage[0])
+        test.add(full_coverage[1])
+        reserved_train = full_coverage[2]
+
+    available = [
+        family for family in families
+        if family not in validation and family not in test and family != reserved_train
+    ]
+    while len(validation) < holdout and available:
+        validation.add(available.pop(0))
+    while len(test) < holdout and available:
+        test.add(available.pop(0))
     train = set(families) - validation - test
+
     pools = {
         "train": [font for font in fonts if font.family in train or font.is_rashi],
         "validation_synthetic": [font for font in fonts if font.family in validation or font.is_rashi],
