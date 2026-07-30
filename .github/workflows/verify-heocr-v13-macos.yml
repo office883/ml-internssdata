@@ -1,0 +1,55 @@
+name: Verify Hebrew OCR v13 on macOS
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v13-macos-trigger/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Clone exact source and verify tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch heocr-v13-source-verified https://github.com/office883/ml-internssdata.git /tmp/heocr-v13-macos
+          cd /tmp/heocr-v13-macos
+          test "$(git rev-parse 'HEAD^{tree}')" = '1ee1b63cfa8b1c8d68c7f216d513eb9aa1e0e7cb'
+          uname -a
+          python --version
+
+      - name: Install pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v13-macos
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements-lock.txt
+          python -m pip install --no-deps --editable .
+
+      - name: Run complete macOS test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v13-macos
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v13-macos-tests.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v13-macos-tests.txt
+          if grep -q 'skipped' /tmp/heocr-v13-macos-tests.txt; then
+            echo 'Unexpected skipped tests on macOS' >&2
+            exit 1
+          fi
+          echo HEOCR_V13_MACOS_RUNTIME_PASS
