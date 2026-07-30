@@ -14,7 +14,7 @@ from . import __version__
 DEFAULT_CONFIG: dict[str, Any] = {
     "builder_version": __version__,
     "output_repo": "ssdataanalysis/hebrew-ocr-unified-sota-v1",
-    "work_dir": str(Path.home() / "hebrew-ocr-unified-work-v13"),
+    "work_dir": str(Path.home() / "hebrew-ocr-unified-work-v15"),
     "upload": True,
     "private": True,
     "deep_remote_verify": True,

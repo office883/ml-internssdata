@@ -1,7 +1,7 @@
 {
-  "builder_version": "13.0.0",
+  "builder_version": "15.0.0",
   "output_repo": "ssdataanalysis/hebrew-ocr-unified-sota-v1",
-  "work_dir": "~/hebrew-ocr-unified-work-v13",
+  "work_dir": "~/hebrew-ocr-unified-work-v15",
   "upload": true,
   "private": true,
   "deep_remote_verify": true,

@@ -78,3 +78,28 @@ def test_font_split_reserves_full_pointed_coverage_for_every_split() -> None:
             POINTED_COVERAGE_CODEPOINTS.issubset(font.cmap) and font.has_gpos
             for font in rows if not font.is_rashi
         ), split
+
+
+def test_system_font_discovery_rejects_last_resort_fallback(monkeypatch, tmp_path) -> None:
+    """A cmap-wide fallback font must never be treated as Hebrew training ink."""
+    from pathlib import Path
+    import heocr_unified.fonts as fonts_module
+    from heocr_unified.fonts import FontInfo
+
+    candidate = tmp_path / "LastResort.otf"
+    candidate.write_bytes(b"fixture")
+    fake = FontInfo(
+        path=candidate,
+        family="LastResort",
+        style="Regular",
+        sha256="a" * 64,
+        cmap=frozenset(range(0x110000)),
+        has_gpos=True,
+        is_rashi=False,
+    )
+    monkeypatch.setattr(fonts_module, "_load_one", lambda _path: fake)
+    fonts_module._discover_fonts_cached.cache_clear()
+    try:
+        assert fonts_module.discover_fonts([tmp_path], include_system=False) == []
+    finally:
+        fonts_module._discover_fonts_cached.cache_clear()

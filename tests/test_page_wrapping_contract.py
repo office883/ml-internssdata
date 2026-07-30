@@ -28,3 +28,40 @@ def test_long_page_lines_are_wrapped_without_loss_and_all_geometry_is_in_bounds(
                 for x, y in item[field]:
                     assert 0 <= float(x) <= width
                     assert 0 <= float(y) <= height
+
+
+@pytest.mark.skipif(not features.check_feature("raqm"), reason="Pillow lacks RAQM")
+def test_table_layout_adapts_font_size_instead_of_dropping_long_text() -> None:
+    renderer = TextRenderer.from_system_fonts()
+    long = "תכנית אדריכלית מפורטת מאוד הכוללת מידות 123.45 מטרים ופרטי ביצוע נוספים " * 6
+    page = renderer.render_page(
+        [long] * 4,
+        profile="clean_digital",
+        layout="table",
+        seed=17,
+        split="train",
+    )
+    compact_source = "".join(long.split()) * 4
+    compact_rendered = "".join(str(item["text"]).replace(" ", "") for item in page.annotations)
+    assert compact_rendered == compact_source
+    assert 11 <= int(page.metadata["page_font_px"]) <= 27
+
+
+@pytest.mark.skipif(not features.check_feature("raqm"), reason="Pillow lacks RAQM")
+def test_maximum_architecture_page_budget_fits_every_layout_without_text_loss() -> None:
+    renderer = TextRenderer.from_system_fonts()
+    source = (
+        "תכנית אדריכלית מפורטת הכוללת מידות 123.45 מטרים ופרטי ביצוע נוספים " * 3
+    )[:112]
+    expected = "".join(source.split()) * 24
+    for layout in PAGE_LAYOUTS:
+        page = renderer.render_page(
+            [source] * 24,
+            profile="clean_digital",
+            layout=layout,
+            seed=20260730,
+            split="train",
+        )
+        rendered = "".join(str(item["text"]).replace(" ", "") for item in page.annotations)
+        assert rendered == expected, layout
+        assert 11 <= int(page.metadata["page_font_px"]) <= 27

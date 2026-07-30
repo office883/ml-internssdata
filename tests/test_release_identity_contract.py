@@ -12,13 +12,13 @@ def test_release_version_and_work_directory_are_consistent() -> None:
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
     user_config = json.loads(Path("config.json").read_text(encoding="utf-8"))
     readme = Path("README_HE.md").read_text(encoding="utf-8")
-    assert __version__ == "13.0.0"
+    assert __version__ == "15.0.0"
     assert project["version"] == __version__
     assert user_config["builder_version"] == __version__
     assert DEFAULT_CONFIG["builder_version"] == __version__
-    assert "Builder v13" in readme
-    assert "hebrew-ocr-unified-work-v13" in readme
-    assert DEFAULT_CONFIG["work_dir"].endswith("hebrew-ocr-unified-work-v13")
+    assert "Builder v15" in readme
+    assert "hebrew-ocr-unified-work-v15" in readme
+    assert DEFAULT_CONFIG["work_dir"].endswith("hebrew-ocr-unified-work-v15")
 
 
 def test_locked_runtime_dependencies_match_project_dependencies() -> None:

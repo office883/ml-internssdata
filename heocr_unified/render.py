@@ -19,6 +19,10 @@ from .unicode_utils import NormalizedLabel, grapheme_clusters, normalize_label_s
 PAGE_LAYOUTS = ["single_column", "two_columns", "table", "form"]
 
 
+class _PageLayoutOverflow(RuntimeError):
+    """The current font size cannot fit all page content without loss."""
+
+
 @dataclass(frozen=True)
 class RenderedLine:
     image: Image.Image
@@ -200,7 +204,7 @@ class TextRenderer:
             normalized = normalize_label_strict(value)
             bbox = self._text_bbox(draw, normalized, font)
             if bbox[2] - bbox[0] > max_width:
-                raise RuntimeError("wrapped page fragment still exceeds cell width")
+                raise _PageLayoutOverflow("wrapped page fragment still exceeds cell width")
             output.append((normalized, font, bbox))
         compact_in = "".join(label.text.split())
         compact_out = "".join(item[0].text.replace(" ", "") for item in output)
@@ -214,183 +218,236 @@ class TextRenderer:
         labels = [normalize_label_strict(text) for text in lines]
         if not labels:
             raise ValueError("page requires at least one line")
+
         width, height = 1200, 1900
         background = (252, 250, 245)
-        image = Image.new("RGB", (width, height), background)
-        blank = Image.new("RGB", (width, height), background)
-        draw = ImageDraw.Draw(image)
-        blank_draw = ImageDraw.Draw(blank)
-        annotations: list[dict[str, Any]] = []
-        order = 0
-
-        def draw_fragment(
-            label: NormalizedLabel,
-            font: ImageFont.FreeTypeFont,
-            bbox: tuple[int, int, int, int],
-            font_info: FontInfo,
-            *,
-            x_right: int,
-            y: int,
-            role: str,
-            row: int,
-            column: int,
-        ) -> int:
-            nonlocal order
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            x = x_right - text_width - bbox[0]
-            x0, y0, x1, y1 = x + bbox[0], y, x + bbox[2], y + text_height
-            if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
-                raise RuntimeError("page text geometry is out of bounds before augmentation")
-            draw.text(
-                (x, y - bbox[1]),
-                label.text,
-                font=font,
-                fill=(20, 20, 20),
-                direction=_direction(label),
-                language="he",
-            )
-            annotations.append({
-                "text": label.text,
-                "reading_order": order,
-                "bbox": [float(x0), float(y0), float(x1), float(y1)],
-                "polygon": [
-                    [float(x0), float(y0)], [float(x1), float(y0)],
-                    [float(x1), float(y1)], [float(x0), float(y1)],
-                ],
-                "baseline": [[float(x0), float(max(y0, y1 - 3))], [float(x1), float(max(y0, y1 - 3))]],
-                "block_role": role,
-                "row": row,
-                "column": column,
-                "font_family": font_info.family,
-                "font_sha256": font_info.sha256,
-            })
-            order += 1
-            return max(36, text_height + 10)
-
-        def wrapped(
-            label: NormalizedLabel,
-            *,
-            max_width: int,
-            role: str,
-            sequence: int,
-        ):
-            font_info = self._choose_font(
-                label, seed=seed + sequence * 13, split=split, rashi=False
-            )
-            font_px = 27 if role == "body" else 29
-            return font_info, self._wrap_label(
-                label, draw=draw, font_info=font_info, font_px=font_px, max_width=max_width
-            )
-
         bottom = height - 80
-        if layout == "single_column":
-            y = 80
-            for sequence, label in enumerate(labels):
-                font_info, fragments = wrapped(label, max_width=width - 180, role="body", sequence=sequence)
-                for fragment, font, bbox in fragments:
-                    step = max(36, bbox[3] - bbox[1] + 10)
-                    if y + step > bottom:
-                        raise RuntimeError("page content does not fit single-column canvas")
-                    y += draw_fragment(
-                        fragment, font, bbox, font_info,
-                        x_right=width - 90, y=y, role="body", row=-1, column=0,
-                    )
-                y += 4
+        last_overflow: RuntimeError | None = None
 
-        elif layout == "two_columns":
-            gap, margin = 50, 70
-            column_width = (width - margin * 2 - gap) // 2
-            split_at = (len(labels) + 1) // 2
-            sequence = 0
-            for column, subset in enumerate((labels[:split_at], labels[split_at:])):
-                x_right = width - margin - column * (column_width + gap)
+        def render_layout(page_font_px: int):
+            image = Image.new("RGB", (width, height), background)
+            blank = Image.new("RGB", (width, height), background)
+            draw = ImageDraw.Draw(image)
+            blank_draw = ImageDraw.Draw(blank)
+            annotations: list[dict[str, Any]] = []
+            order = 0
+
+            def fragment_step(bbox: tuple[int, int, int, int], *, role: str) -> int:
+                text_height = bbox[3] - bbox[1]
+                role_padding = 9 if role == "field" else 7
+                return max(18, text_height + role_padding, page_font_px + 5)
+
+            def draw_fragment(
+                label: NormalizedLabel,
+                font: ImageFont.FreeTypeFont,
+                bbox: tuple[int, int, int, int],
+                font_info: FontInfo,
+                *,
+                x_right: int,
+                y: int,
+                role: str,
+                row: int,
+                column: int,
+                source_line_index: int,
+                fragment_index: int,
+                fragment_count: int,
+            ) -> int:
+                nonlocal order
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                x = x_right - text_width - bbox[0]
+                x0, y0, x1, y1 = x + bbox[0], y, x + bbox[2], y + text_height
+                if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+                    raise _PageLayoutOverflow("page text geometry is out of bounds before augmentation")
+                draw.text(
+                    (x, y - bbox[1]),
+                    label.text,
+                    font=font,
+                    fill=(20, 20, 20),
+                    direction=_direction(label),
+                    language="he",
+                )
+                annotations.append({
+                    "text": label.text,
+                    "reading_order": order,
+                    "bbox": [float(x0), float(y0), float(x1), float(y1)],
+                    "polygon": [
+                        [float(x0), float(y0)], [float(x1), float(y0)],
+                        [float(x1), float(y1)], [float(x0), float(y1)],
+                    ],
+                    "baseline": [
+                        [float(x0), float(max(y0, y1 - 3))],
+                        [float(x1), float(max(y0, y1 - 3))],
+                    ],
+                    "block_role": role,
+                    "row": row,
+                    "column": column,
+                    "source_line_index": source_line_index,
+                    "fragment_index": fragment_index,
+                    "fragment_count": fragment_count,
+                    "font_family": font_info.family,
+                    "font_sha256": font_info.sha256,
+                })
+                order += 1
+                return fragment_step(bbox, role=role)
+
+            def wrapped(
+                label: NormalizedLabel,
+                *,
+                max_width: int,
+                role: str,
+                sequence: int,
+            ):
+                font_info = self._choose_font(
+                    label, seed=seed + sequence * 13, split=split, rashi=False
+                )
+                role_font_px = page_font_px + (2 if role == "field" else 0)
+                return font_info, self._wrap_label(
+                    label,
+                    draw=draw,
+                    font_info=font_info,
+                    font_px=role_font_px,
+                    max_width=max_width,
+                )
+
+            if layout == "single_column":
                 y = 80
-                for label in subset:
+                for sequence, label in enumerate(labels):
                     font_info, fragments = wrapped(
-                        label, max_width=column_width, role="body", sequence=sequence
+                        label, max_width=width - 180, role="body", sequence=sequence
                     )
-                    sequence += 1
-                    for fragment, font, bbox in fragments:
-                        step = max(36, bbox[3] - bbox[1] + 10)
+                    for fragment_index, (fragment, font, bbox) in enumerate(fragments):
+                        step = fragment_step(bbox, role="body")
                         if y + step > bottom:
-                            raise RuntimeError("page content does not fit two-column canvas")
+                            raise _PageLayoutOverflow("page content does not fit single-column canvas")
                         y += draw_fragment(
                             fragment, font, bbox, font_info,
-                            x_right=x_right, y=y, role="body", row=-1, column=column,
+                            x_right=width - 90, y=y, role="body", row=-1, column=0,
+                            source_line_index=sequence, fragment_index=fragment_index,
+                            fragment_count=len(fragments),
                         )
-                    y += 4
+                    y += max(2, page_font_px // 7)
 
-        elif layout == "table":
-            margin, top = 70, 90
-            col_widths = [360, 360, 340]
-            x_positions = [width - margin]
-            for value in col_widths:
-                x_positions.append(x_positions[-1] - value)
-            sequence = 0
-            logical_rows = [labels[i:i + 3] for i in range(0, len(labels), 3)]
-            y = top
-            for row_index, row_labels in enumerate(logical_rows):
-                prepared = []
-                max_fragments = 1
-                for column, label in enumerate(row_labels):
+            elif layout == "two_columns":
+                gap, margin = 50, 70
+                column_width = (width - margin * 2 - gap) // 2
+                split_at = (len(labels) + 1) // 2
+                sequence = 0
+                for column, subset in enumerate((labels[:split_at], labels[split_at:])):
+                    x_right = width - margin - column * (column_width + gap)
+                    y = 80
+                    for label in subset:
+                        font_info, fragments = wrapped(
+                            label, max_width=column_width, role="body", sequence=sequence
+                        )
+                        for fragment_index, (fragment, font, bbox) in enumerate(fragments):
+                            step = fragment_step(bbox, role="body")
+                            if y + step > bottom:
+                                raise _PageLayoutOverflow("page content does not fit two-column canvas")
+                            y += draw_fragment(
+                                fragment, font, bbox, font_info,
+                                x_right=x_right, y=y, role="body", row=-1, column=column,
+                                source_line_index=sequence, fragment_index=fragment_index,
+                                fragment_count=len(fragments),
+                            )
+                        y += max(2, page_font_px // 7)
+                        sequence += 1
+
+            elif layout == "table":
+                margin, top = 70, 90
+                col_widths = [360, 360, 340]
+                x_positions = [width - margin]
+                for value in col_widths:
+                    x_positions.append(x_positions[-1] - value)
+                sequence = 0
+                logical_rows = [labels[i:i + 3] for i in range(0, len(labels), 3)]
+                y = top
+                for row_index, row_labels in enumerate(logical_rows):
+                    prepared = []
+                    content_heights: list[int] = []
+                    for column, label in enumerate(row_labels):
+                        info, fragments = wrapped(
+                            label,
+                            max_width=col_widths[column] - 24,
+                            role="body",
+                            sequence=sequence,
+                        )
+                        steps = [fragment_step(bbox, role="body") for _, _, bbox in fragments]
+                        prepared.append((column, sequence, info, fragments, steps))
+                        content_heights.append(sum(steps))
+                        sequence += 1
+                    row_height = max(page_font_px + 29, max(content_heights, default=0) + 20)
+                    if y + row_height > bottom:
+                        raise _PageLayoutOverflow("page content does not fit table canvas")
+                    for drawer in (draw, blank_draw):
+                        drawer.rectangle(
+                            (x_positions[-1], y, x_positions[0], y + row_height),
+                            outline=(110, 110, 110), width=1,
+                        )
+                        for boundary in x_positions[1:-1]:
+                            drawer.line(
+                                (boundary, y, boundary, y + row_height),
+                                fill=(110, 110, 110), width=1,
+                            )
+                    for column, source_index, info, fragments, _steps in prepared:
+                        local_y = y + 10
+                        x_right = x_positions[column] - 12
+                        for fragment_index, (fragment, font, bbox) in enumerate(fragments):
+                            local_y += draw_fragment(
+                                fragment, font, bbox, info,
+                                x_right=x_right, y=local_y, role="cell",
+                                row=row_index, column=column,
+                                source_line_index=source_index,
+                                fragment_index=fragment_index,
+                                fragment_count=len(fragments),
+                            )
+                    y += row_height
+
+            else:  # form
+                y = 80
+                for row_index, label in enumerate(labels):
                     info, fragments = wrapped(
-                        label,
-                        max_width=col_widths[column] - 24,
-                        role="body",
-                        sequence=sequence,
+                        label, max_width=width - 230, role="field", sequence=row_index
                     )
-                    sequence += 1
-                    prepared.append((column, info, fragments))
-                    max_fragments = max(max_fragments, len(fragments))
-                row_height = max(56, max_fragments * 38 + 20)
-                if y + row_height > bottom:
-                    raise RuntimeError("page content does not fit table canvas")
-                for drawer in (draw, blank_draw):
-                    drawer.rectangle(
-                        (x_positions[-1], y, x_positions[0], y + row_height),
-                        outline=(110, 110, 110), width=1,
-                    )
-                    for boundary in x_positions[1:-1]:
-                        drawer.line((boundary, y, boundary, y + row_height), fill=(110, 110, 110), width=1)
-                for column, info, fragments in prepared:
-                    local_y = y + 10
-                    x_right = x_positions[column] - 12
-                    for fragment, font, bbox in fragments:
+                    steps = [fragment_step(bbox, role="field") for _, _, bbox in fragments]
+                    field_height = max(page_font_px + 33, sum(steps) + 18)
+                    if y + field_height > bottom:
+                        raise _PageLayoutOverflow("page content does not fit form canvas")
+                    rectangle = (80, y, width - 80, y + field_height)
+                    for drawer in (draw, blank_draw):
+                        drawer.rounded_rectangle(
+                            rectangle, radius=8, outline=(150, 150, 150), width=1
+                        )
+                    local_y = y + 9
+                    for fragment_index, (fragment, font, bbox) in enumerate(fragments):
                         local_y += draw_fragment(
                             fragment, font, bbox, info,
-                            x_right=x_right, y=local_y, role="cell",
-                            row=row_index, column=column,
+                            x_right=width - 105, y=local_y, role="field",
+                            row=row_index, column=0,
+                            source_line_index=row_index, fragment_index=fragment_index,
+                            fragment_count=len(fragments),
                         )
-                y += row_height
+                    y += field_height + max(4, page_font_px // 4)
 
-        else:  # form
-            y = 80
-            for row_index, label in enumerate(labels):
-                info, fragments = wrapped(
-                    label, max_width=width - 230, role="field", sequence=row_index
-                )
-                field_height = max(58, len(fragments) * 42 + 18)
-                if y + field_height > bottom:
-                    raise RuntimeError("page content does not fit form canvas")
-                rectangle = (80, y, width - 80, y + field_height)
-                for drawer in (draw, blank_draw):
-                    drawer.rounded_rectangle(
-                        rectangle, radius=8, outline=(150, 150, 150), width=1
-                    )
-                local_y = y + 9
-                for fragment, font, bbox in fragments:
-                    local_y += draw_fragment(
-                        fragment, font, bbox, info,
-                        x_right=width - 105, y=local_y, role="field",
-                        row=row_index, column=0,
-                    )
-                y += field_height + 8
+            if not annotations:
+                raise RuntimeError("page renderer produced no text annotations")
+            if [item["reading_order"] for item in annotations] != list(range(len(annotations))):
+                raise RuntimeError("page reading order is not contiguous")
+            return image, blank, annotations
 
-        if not annotations:
-            raise RuntimeError("page renderer produced no text annotations")
-        if [item["reading_order"] for item in annotations] != list(range(len(annotations))):
-            raise RuntimeError("page reading order is not contiguous")
+        image = blank = None
+        annotations: list[dict[str, Any]] = []
+        page_font_px = 0
+        for candidate in range(27, 10, -2):
+            try:
+                image, blank, annotations = render_layout(candidate)
+                page_font_px = candidate
+                break
+            except _PageLayoutOverflow as exc:
+                last_overflow = exc
+        if image is None or blank is None or not annotations:
+            detail = f": {last_overflow}" if last_overflow is not None else ""
+            raise RuntimeError(f"page content cannot fit canvas without dropping text{detail}")
 
         before = _mask_difference(image, blank)
 
@@ -438,6 +495,7 @@ class TextRenderer:
             "profile": effective_profile,
             "layout": layout,
             "seed": seed,
+            "page_font_px": page_font_px,
             "visibility_fraction": round(visibility, 6),
             "augmentation": augmented.metadata,
         }

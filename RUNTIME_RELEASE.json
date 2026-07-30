@@ -1,0 +1,6 @@
+{
+  "runtime_release": "15.0.0",
+  "dataset_builder_core": "15.0.0",
+  "status": "source-candidate",
+  "purpose": "macOS-safe Hebrew OCR dataset builder with filtered font discovery and adaptive page layout"
+}

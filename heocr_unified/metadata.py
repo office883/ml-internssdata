@@ -170,7 +170,7 @@ def write_dataset_card(output_root: str | Path, summary: dict[str, Any]) -> None
         "license: other",
         "task_categories:",
         "- image-to-text",
-        "pretty_name: Hebrew OCR Unified SOTA-Capable v13",
+        "pretty_name: Hebrew OCR Unified SOTA-Capable v15",
         "tags:",
         "- ocr",
         "- htr",

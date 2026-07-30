@@ -25,7 +25,7 @@ def test_run_probes_private_write_access_before_any_build(monkeypatch, tmp_path:
 
     config_path = tmp_path / "config.json"
     config_path.write_text(
-        '{"builder_version":"13.0.0","output_repo":"ssdataanalysis/hebrew-ocr-unified-sota-v1",'
+        '{"builder_version":"15.0.0","output_repo":"ssdataanalysis/hebrew-ocr-unified-sota-v1",'
         '"work_dir":"%s","upload":true,"private":true,"deep_remote_verify":true,'
         '"minimum_free_gib":0}' % str(tmp_path / "work"),
         encoding="utf-8",

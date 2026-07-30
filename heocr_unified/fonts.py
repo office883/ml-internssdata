@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 from functools import lru_cache
 from dataclasses import dataclass
@@ -37,6 +38,30 @@ class FontInfo:
         if not required.issubset(self.cmap):
             return False
         return not require_marks or self.has_gpos
+
+
+
+
+_FALLBACK_FONT_IDENTIFIERS = frozenset({
+    "lastresort",
+    "lastresortregular",
+    "applesymbols",
+    "applecoloremoji",
+})
+
+
+def _font_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _is_fallback_font(info: FontInfo) -> bool:
+    """Reject cmap-wide fallback/symbol fonts that do not contain real Hebrew ink."""
+    identifiers = {
+        _font_identifier(info.family),
+        _font_identifier(info.path.stem),
+        _font_identifier(info.path.name),
+    }
+    return bool(identifiers & _FALLBACK_FONT_IDENTIFIERS)
 
 
 def _sha256(path: Path) -> str:
@@ -124,7 +149,7 @@ def _discover_fonts_cached(extra_dirs: tuple[str, ...], include_system: bool) ->
                 continue
             seen.add(resolved)
             info = _load_one(resolved)
-            if info is None:
+            if info is None or _is_fallback_font(info):
                 continue
             probe = "אבגדהוזחטיךכלםמןנסעףפץצקרשת0123456789-.,()"
             if info.supports(probe):
