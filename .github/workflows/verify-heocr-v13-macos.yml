@@ -23,41 +23,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf /tmp/heocr-v13-macos
           git clone --depth 1 --branch heocr-v13-source-verified https://github.com/office883/ml-internssdata.git /tmp/heocr-v13-macos
           cd /tmp/heocr-v13-macos
           test "$(git rev-parse 'HEAD^{tree}')" = '1ee1b63cfa8b1c8d68c7f216d513eb9aa1e0e7cb'
           uname -a
           python --version
 
-      - name: Install native RAQM and build Pillow from source
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew install pkg-config libraqm freetype jpeg-turbo openjpeg libtiff webp little-cms2
-          export HOMEBREW_PREFIX="$(brew --prefix)"
-          export CPPFLAGS="-I${HOMEBREW_PREFIX}/include -I$(brew --prefix freetype)/include -I$(brew --prefix jpeg-turbo)/include"
-          export LDFLAGS="-L${HOMEBREW_PREFIX}/lib -L$(brew --prefix freetype)/lib -L$(brew --prefix jpeg-turbo)/lib"
-          export PKG_CONFIG_PATH="${HOMEBREW_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/share/pkgconfig:$(brew --prefix libraqm)/lib/pkgconfig:$(brew --prefix freetype)/lib/pkgconfig:$(brew --prefix jpeg-turbo)/lib/pkgconfig"
-          pkg-config --modversion raqm
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --no-cache-dir --no-binary Pillow 'Pillow==12.2.0'
-          python - <<'PY'
-          from PIL import features
-          assert features.check_feature('raqm'), features.get_supported_features()
-          print('RAQM', features.version_feature('raqm'))
-          print('FRIBIDI', features.version_feature('fribidi'))
-          print('HARFBUZZ', features.version_feature('harfbuzz'))
-          PY
-
-      - name: Install remaining pinned dependencies
+      - name: Install native RAQM and pinned Python environment
         shell: bash
         run: |
           set -euo pipefail
           cd /tmp/heocr-v13-macos
-          python -m pip install --requirement requirements-lock.txt
+
+          brew install pkg-config libraqm
+
+          python -m pip install --upgrade pip setuptools wheel
+          grep -v '^Pillow==' requirements-lock.txt > /tmp/heocr-v13-requirements-without-pillow.txt
+          python -m pip install --requirement /tmp/heocr-v13-requirements-without-pillow.txt
+
+          export PKG_CONFIG_PATH="$(brew --prefix libraqm)/lib/pkgconfig:$(brew --prefix harfbuzz)/lib/pkgconfig:$(brew --prefix fribidi)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CPPFLAGS="-I$(brew --prefix libraqm)/include -I$(brew --prefix harfbuzz)/include -I$(brew --prefix fribidi)/include ${CPPFLAGS:-}"
+          export LDFLAGS="-L$(brew --prefix libraqm)/lib -L$(brew --prefix harfbuzz)/lib -L$(brew --prefix fribidi)/lib ${LDFLAGS:-}"
+
+          python -m pip uninstall -y Pillow || true
+          python -m pip install --no-cache-dir --no-binary Pillow 'Pillow==12.2.0'
           python -m pip install --no-deps --editable .
 
-      - name: Run complete macOS test suite
+          python - <<'PY'
+          from PIL import Image, features
+          print('PILLOW_VERSION', Image.__version__)
+          print('RAQM', features.check_feature('raqm'), features.version_feature('raqm'))
+          print('FRIBIDI', features.version_feature('fribidi'))
+          print('HARFBUZZ', features.version_feature('harfbuzz'))
+          assert features.check_feature('raqm'), 'Pillow was built without RAQM'
+          assert features.version_feature('fribidi')
+          assert features.version_feature('harfbuzz')
+          PY
+
+      - name: Run complete macOS test suite without skips
         shell: bash
         run: |
           set -euo pipefail
@@ -65,10 +69,16 @@ jobs:
           python -m compileall -q heocr_unified tests
           bash -n RUN_ME.command
           git diff --check
-          python -m pytest -q --disable-warnings | tee /tmp/heocr-v13-macos-tests.txt
+
+          set +e
+          python -m pytest -q -rs --tb=short > /tmp/heocr-v13-macos-tests.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/heocr-v13-macos-tests.txt
+          test "$rc" -eq 0
           grep -Eq '[0-9]+ passed' /tmp/heocr-v13-macos-tests.txt
-          if grep -q 'skipped' /tmp/heocr-v13-macos-tests.txt; then
+          if grep -qi 'skipped' /tmp/heocr-v13-macos-tests.txt; then
             echo 'Unexpected skipped tests on macOS' >&2
             exit 1
           fi
-          echo HEOCR_V13_MACOS_RAQM_RUNTIME_PASS
+          echo HEOCR_V13_MACOS_RUNTIME_PASS
