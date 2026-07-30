@@ -1,0 +1,111 @@
+name: Publish verified Hebrew OCR v13 source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-heocr-v13-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PATCH_REF: heocr-v13-source-candidate
+      PATCH_PATH: tmp/heocr-v13-patch/part-000.b64
+      PATCH_PART_BYTES: '7716'
+      PATCH_PART_SHA256: 219197e6969843254bb6a47f6384f6b8a06d67e9734856c9f5725c3f1841b19f
+      PATCH_GZ_SHA256: 2dfae67804bacca4f0c2d2dd3cd03d188e1f97b79bd88e968d086617148a63dc
+      PATCH_SHA256: f0622e68b53d26273d5a02c855d1e7395949ad93247d090e28a72f27c20f1a26
+      BASE_TREE: 1b26ed9562c6c4b18b64952983d82d8a08c6a825
+      TARGET_TREE: 1ee1b63cfa8b1c8d68c7f216d513eb9aa1e0e7cb
+      TARGET_BRANCH: heocr-v13-source-verified
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct exact v13 source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v13-publish
+          rm -rf "$root"
+          mkdir -p "$root"
+          git clone --depth 1 --branch heocr-v12-source-verified "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$root/source"
+          cd "$root/source"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$BASE_TREE"
+
+          gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/contents/${PATCH_PATH}?ref=${PATCH_REF}" \
+            --jq '.content' | tr -d '\n' | base64 --decode > "$root/patch.b64"
+          test "$(wc -c < "$root/patch.b64")" -eq "$PATCH_PART_BYTES"
+          echo "$PATCH_PART_SHA256  $root/patch.b64" | sha256sum --check --status
+          tr -d '\n\r\t ' < "$root/patch.b64" | base64 --decode > "$root/v12-to-v13.patch.gz"
+          echo "$PATCH_GZ_SHA256  $root/v12-to-v13.patch.gz" | sha256sum --check --status
+          gzip --test "$root/v12-to-v13.patch.gz"
+          gzip --decompress --stdout "$root/v12-to-v13.patch.gz" > "$root/v12-to-v13.patch"
+          echo "$PATCH_SHA256  $root/v12-to-v13.patch" | sha256sum --check --status
+
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git am "$root/v12-to-v13.patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test -z "$(git status --porcelain)"
+          echo "V13_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Install pinned dependencies and run every test
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v13-publish/source
+          python -m pip install --upgrade pip
+          python -m pip install --requirement "$root/requirements-lock.txt"
+          python -m pip install --no-deps --editable "$root"
+          cd "$root"
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v13-publish/PYTEST.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v13-publish/PYTEST.txt
+          if grep -q 'skipped' /tmp/heocr-v13-publish/PYTEST.txt; then
+            echo 'Unexpected skipped tests in v13 clean-room' >&2
+            exit 1
+          fi
+
+      - name: Publish exact source branch and package archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v13-publish
+          cd "$root/source"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v13/ -o "$root/hebrew_ocr_unified_builder_v13.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v13/ -o "$root/hebrew_ocr_unified_builder_v13.zip" HEAD
+          mkdir -p "$root/evidence"
+          cp "$root/PYTEST.txt" "$root/evidence/"
+          sha256sum "$root/hebrew_ocr_unified_builder_v13.tar.gz" "$root/hebrew_ocr_unified_builder_v13.zip" > "$root/evidence/SHA256SUMS.txt"
+          git rev-parse HEAD > "$root/evidence/SOURCE_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/SOURCE_TREE.txt"
+          tar --list --gzip --file "$root/hebrew_ocr_unified_builder_v13.tar.gz" > "$root/evidence/SOURCE_CONTENTS.txt"
+          echo HEOCR_V13_SOURCE_PUBLISH_PASS
+
+      - name: Upload verified v13 source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v13-source-verified
+          path: |
+            /tmp/heocr-v13-publish/hebrew_ocr_unified_builder_v13.tar.gz
+            /tmp/heocr-v13-publish/hebrew_ocr_unified_builder_v13.zip
+            /tmp/heocr-v13-publish/evidence
+          if-no-files-found: error
+          retention-days: 1
