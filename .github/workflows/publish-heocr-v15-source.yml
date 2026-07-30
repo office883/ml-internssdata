@@ -1,0 +1,196 @@
+name: Publish and verify Hebrew OCR v15 source
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v15-trigger/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux_publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct exact v15 source from verified v13 plus pinned patch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v15
+          rm -rf "$root"
+          mkdir -p "$root"
+          git clone --depth 1 --branch heocr-v13-source-verified "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$root/source"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/contents/tmp/heocr-v15-patch/heocr-v13-to-v15.patch.gz.b64?ref=heocr-v15-source-candidate" \
+            --jq '.content' | tr -d '\n' | base64 --decode > "$root/patch.b64"
+          test "$(wc -c < "$root/patch.b64")" -eq 17212
+          echo 'e9d1a4a2b35adb9dbd4a437a10eb048d9ae38213b1567daab10a3d6df6821c1a  /tmp/heocr-v15/patch.b64' | sha256sum --check --status
+          tr -d '\n\r\t ' < "$root/patch.b64" | base64 --decode > "$root/patch.gz"
+          echo 'a5697221e4511d32c788a69149c9a28552a251c34db942a13face1d873ddd3ae  /tmp/heocr-v15/patch.gz' | sha256sum --check --status
+          gzip --test "$root/patch.gz"
+          gzip --decompress --stdout "$root/patch.gz" > "$root/patch"
+          echo '0a7f4acdc41375a2941f19d2e5d084f010ae76c424210f0405e1dac3ebeb240f  /tmp/heocr-v15/patch' | sha256sum --check --status
+          cd "$root/source"
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git apply --index "$root/patch"
+          git diff --cached --check
+          git commit -m 'fix: make Hebrew OCR builder macOS-safe and page-fit robust'
+          test -z "$(git status --porcelain)"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)"
+          echo "SOURCE_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Install pinned dependencies and run every Linux test
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v15/source
+          python -m pip install --upgrade pip
+          python -m pip install --requirement "$root/requirements-lock.txt"
+          python -m pip install --no-deps --editable "$root"
+          cd "$root"
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v15-linux-tests.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v15-linux-tests.txt
+          if grep -q 'skipped' /tmp/heocr-v15-linux-tests.txt; then
+            echo 'Unexpected skipped tests on Linux' >&2
+            exit 1
+          fi
+          echo HEOCR_V15_LINUX_PASS
+
+      - name: Publish exact source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v15/source
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:refs/heads/heocr-v15-source-verified
+
+      - name: Upload Linux test evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v15-linux-evidence
+          path: /tmp/heocr-v15-linux-tests.txt
+          if-no-files-found: error
+          retention-days: 2
+
+  macos_verify:
+    needs: linux_publish
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Clone exact v15 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch heocr-v15-source-verified https://github.com/${GITHUB_REPOSITORY}.git /tmp/heocr-v15-macos
+          cd /tmp/heocr-v15-macos
+          test "$(python -c 'import pathlib; print("15.0.0" if "15.0.0" in pathlib.Path("pyproject.toml").read_text() else "")')" = '15.0.0'
+          uname -a
+          python --version
+
+      - name: Install native RTL runtime and build Pillow with RAQM
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install pkg-config libraqm harfbuzz fribidi freetype jpeg-turbo openjpeg libtiff webp little-cms2
+          export HOMEBREW_PREFIX="$(brew --prefix)"
+          export CPPFLAGS="-I${HOMEBREW_PREFIX}/include -I$(brew --prefix freetype)/include -I$(brew --prefix jpeg-turbo)/include"
+          export LDFLAGS="-L${HOMEBREW_PREFIX}/lib -L$(brew --prefix freetype)/lib -L$(brew --prefix jpeg-turbo)/lib"
+          export PKG_CONFIG_PATH="$(brew --prefix libraqm)/lib/pkgconfig:$(brew --prefix harfbuzz)/lib/pkgconfig:$(brew --prefix fribidi)/lib/pkgconfig:$(brew --prefix freetype)/lib/pkgconfig:${HOMEBREW_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/share/pkgconfig"
+          pkg-config --modversion raqm
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-cache-dir --no-binary Pillow 'Pillow==12.2.0'
+          python - <<'PY'
+          from PIL import features
+          assert features.check_feature('raqm'), features.get_supported_features()
+          print('RAQM', features.version_feature('raqm'))
+          PY
+          grep -vi '^Pillow==' /tmp/heocr-v15-macos/requirements-lock.txt > /tmp/heocr-v15-macos/requirements-without-pillow.txt
+          python -m pip install --requirement /tmp/heocr-v15-macos/requirements-without-pillow.txt
+          python -m pip install --no-deps --editable /tmp/heocr-v15-macos
+
+      - name: Run complete macOS test suite without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v15-macos
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v15-macos-tests.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v15-macos-tests.txt
+          if grep -q 'skipped' /tmp/heocr-v15-macos-tests.txt; then
+            echo 'Unexpected skipped tests on macOS' >&2
+            exit 1
+          fi
+          echo HEOCR_V15_MACOS_RAQM_PASS
+
+      - name: Upload macOS test evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v15-macos-evidence
+          path: /tmp/heocr-v15-macos-tests.txt
+          if-no-files-found: error
+          retention-days: 2
+
+  package:
+    needs: [linux_publish, macos_verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Clone verified v15 source and create deterministic archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v15-release
+          rm -rf "$root"
+          mkdir -p "$root/evidence"
+          git clone --depth 1 --branch heocr-v15-source-verified https://github.com/${GITHUB_REPOSITORY}.git "$root/source"
+          cd "$root/source"
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v15/ -o "$root/hebrew_ocr_unified_builder_v15.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v15/ -o "$root/hebrew_ocr_unified_builder_v15.zip" HEAD
+          sha256sum "$root/hebrew_ocr_unified_builder_v15.tar.gz" "$root/hebrew_ocr_unified_builder_v15.zip" > "$root/evidence/SHA256SUMS.txt"
+          git rev-parse HEAD > "$root/evidence/SOURCE_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/SOURCE_TREE.txt"
+          unzip -t "$root/hebrew_ocr_unified_builder_v15.zip" > "$root/evidence/ZIP_TEST.txt"
+          tar -tzf "$root/hebrew_ocr_unified_builder_v15.tar.gz" > "$root/evidence/SOURCE_CONTENTS.txt"
+          echo HEOCR_V15_PACKAGE_PASS
+
+      - name: Download verification evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: heocr-v15-*-evidence
+          path: /tmp/heocr-v15-release/evidence
+          merge-multiple: true
+
+      - name: Upload verified v15 release
+        uses: actions/upload-artifact@v4
+        with:
+          name: hebrew-ocr-unified-builder-v15-verified
+          path: |
+            /tmp/heocr-v15-release/hebrew_ocr_unified_builder_v15.tar.gz
+            /tmp/heocr-v15-release/hebrew_ocr_unified_builder_v15.zip
+            /tmp/heocr-v15-release/evidence
+          if-no-files-found: error
+          retention-days: 2
