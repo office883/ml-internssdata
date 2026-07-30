@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -72,6 +74,98 @@ def _ensure_remote_safe(api: HfApi, repo_id: str, root: Path, token: str) -> Non
     local=(root/"BUILD_FINGERPRINT").read_text(encoding="ascii").strip()
     if remote.read_text(encoding="ascii").strip()!=local:
         raise UploadVerificationError("existing remote repository belongs to another build fingerprint")
+
+
+
+def probe_private_write_access(
+    *,
+    output_repo: str,
+    token: str,
+) -> dict[str, Any]:
+    """Fail-fast check that the active token can create, write, read and delete a private dataset repo."""
+    namespace = str(output_repo).split("/", 1)[0].strip()
+    if not namespace or "/" not in str(output_repo):
+        raise UploadVerificationError("output_repo must be in namespace/name form")
+    probe_repo_id = f"{namespace}/heocr-write-probe-{uuid.uuid4().hex[:12]}"
+    payload = json.dumps(
+        {
+            "purpose": "hebrew-ocr-unified-builder-write-probe",
+            "output_repo": str(output_repo),
+            "nonce": uuid.uuid4().hex,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    api = HfApi(token=token)
+    created = False
+    primary_error: Exception | None = None
+    cleanup_error: Exception | None = None
+    result: dict[str, Any] | None = None
+    try:
+        api.create_repo(
+            repo_id=probe_repo_id,
+            repo_type="dataset",
+            private=True,
+            exist_ok=False,
+        )
+        created = True
+        info = api.dataset_info(probe_repo_id)
+        if not bool(info.private):
+            raise UploadVerificationError("write probe repository was not private")
+        api.upload_file(
+            repo_id=probe_repo_id,
+            repo_type="dataset",
+            path_or_fileobj=payload,
+            path_in_repo="WRITE_PROBE.json",
+            commit_message="Verify private dataset write access",
+        )
+        committed = api.dataset_info(probe_repo_id)
+        if not bool(committed.private):
+            raise UploadVerificationError("write probe repository became public")
+        with tempfile.TemporaryDirectory(prefix="heocr-write-probe-") as cache_dir:
+            downloaded = Path(
+                hf_hub_download(
+                    repo_id=probe_repo_id,
+                    repo_type="dataset",
+                    revision=committed.sha,
+                    filename="WRITE_PROBE.json",
+                    token=token,
+                    cache_dir=cache_dir,
+                    force_download=True,
+                )
+            )
+            if downloaded.read_bytes() != payload:
+                raise UploadVerificationError("write probe download did not match uploaded bytes")
+        result = {
+            "status": "PASS",
+            "namespace": namespace,
+            "probe_repo_id": probe_repo_id,
+            "private": True,
+            "uploaded_bytes": len(payload),
+            "download_verified": True,
+            "deleted": True,
+        }
+    except Exception as exc:  # deliberately normalize all network/auth failures
+        primary_error = exc
+    finally:
+        if created:
+            try:
+                api.delete_repo(repo_id=probe_repo_id, repo_type="dataset")
+            except Exception as exc:
+                cleanup_error = exc
+    if primary_error is not None:
+        message = f"Hugging Face private write probe failed: {primary_error}"
+        if cleanup_error is not None:
+            message += f"; cleanup also failed: {cleanup_error}"
+        if isinstance(primary_error, UploadVerificationError):
+            raise UploadVerificationError(message) from primary_error
+        raise UploadVerificationError(message) from primary_error
+    if cleanup_error is not None:
+        raise UploadVerificationError(
+            f"Hugging Face private write probe cleanup failed: {cleanup_error}"
+        ) from cleanup_error
+    assert result is not None
+    return result
 
 
 def upload_private_release(

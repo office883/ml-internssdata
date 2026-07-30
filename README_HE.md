@@ -1,4 +1,4 @@
-# Hebrew OCR Unified Builder v12
+# Hebrew OCR Unified Builder v13
 
 כלי fail-closed לבניית מאגר OCR/HTR עברי מאוחד מארבעת המאגרים הפרטיים בחשבון `ssdataanalysis`:
 
@@ -38,19 +38,26 @@ chmod +x RUN_ME.command
 ./RUN_ME.command
 ```
 
+לבדיקת הרשאת הכתיבה בלבד, בלי להתחיל build:
+
+```bash
+.venv/bin/python -m heocr_unified probe-upload --config config.json
+```
+
 הפקודה מבצעת:
 
 1. אימות חשבון Hugging Face וסביבת Python 3.12.
 2. יצירת venv והתקנת dependencies נעולות.
 3. הרצת כל בדיקות הקוד, כולל PyArrow ו־corruption suite.
-4. mini-build אמיתי מכל ארבעת המקורות וכל splits/configs.
-5. QA מקיף ויצירת `LOCAL_READY.json` ל־mini רק אם הכול עבר.
-6. build מלא resumable.
-7. QA, previews, release manifest וניסויי השחתה על הפלט המלא.
-8. העלאה ל־dataset פרטי ואימות הורדה חוזרת.
-9. יצירת `REMOTE_READY.json` רק לאחר התאמה מלאה של המאגר המרוחק.
+4. בדיקת הרשאת write אמיתית: יצירת repo פרטי זמני, העלאת קובץ, הורדה חוזרת ומחיקה.
+5. mini-build אמיתי מכל ארבעת המקורות וכל splits/configs.
+6. QA מקיף ויצירת `LOCAL_READY.json` ל־mini רק אם הכול עבר.
+7. build מלא resumable.
+8. QA, previews, release manifest וניסויי השחתה על הפלט המלא.
+9. העלאה ל־dataset פרטי ואימות הורדה חוזרת.
+10. יצירת `REMOTE_READY.json` רק לאחר התאמה מלאה של המאגר המרוחק.
 
-קובצי העבודה נשמרים ב־`~/hebrew-ocr-unified-work-v12`. אפשר להריץ שוב לאחר ניתוק; completed source units נבדקים מחדש לפי hash ומספר שורות לפני resume. זהות הבנייה קשורה ל־config, ל־revisions, לפונטים ול־SHA-256 דטרמיניסטי של קוד ה־builder וקובצי התלויות.
+קובצי העבודה נשמרים ב־`~/hebrew-ocr-unified-work-v13`. אפשר להריץ שוב לאחר ניתוק; completed source units נבדקים מחדש לפי hash ומספר שורות לפני resume. זהות הבנייה קשורה ל־config, ל־revisions, לפונטים ול־SHA-256 דטרמיניסטי של קוד ה־builder וקובצי התלויות.
 
 ## כיסוי סינתטי חדש
 
