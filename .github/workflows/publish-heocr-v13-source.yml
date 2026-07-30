@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - '.github/workflows/publish-heocr-v13-source.yml'
+  pull_request:
+    paths:
+      - 'tmp/heocr-v13-publish-trigger/**'
   workflow_dispatch:
 
 permissions:
