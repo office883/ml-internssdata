@@ -29,12 +29,31 @@ jobs:
           uname -a
           python --version
 
-      - name: Install pinned dependencies
+      - name: Install native RAQM and build Pillow from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install pkg-config libraqm freetype jpeg-turbo openjpeg libtiff webp little-cms2
+          export HOMEBREW_PREFIX="$(brew --prefix)"
+          export CPPFLAGS="-I${HOMEBREW_PREFIX}/include -I$(brew --prefix freetype)/include -I$(brew --prefix jpeg-turbo)/include"
+          export LDFLAGS="-L${HOMEBREW_PREFIX}/lib -L$(brew --prefix freetype)/lib -L$(brew --prefix jpeg-turbo)/lib"
+          export PKG_CONFIG_PATH="${HOMEBREW_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/share/pkgconfig:$(brew --prefix libraqm)/lib/pkgconfig:$(brew --prefix freetype)/lib/pkgconfig:$(brew --prefix jpeg-turbo)/lib/pkgconfig"
+          pkg-config --modversion raqm
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-cache-dir --no-binary Pillow 'Pillow==12.2.0'
+          python - <<'PY'
+          from PIL import features
+          assert features.check_feature('raqm'), features.get_supported_features()
+          print('RAQM', features.version_feature('raqm'))
+          print('FRIBIDI', features.version_feature('fribidi'))
+          print('HARFBUZZ', features.version_feature('harfbuzz'))
+          PY
+
+      - name: Install remaining pinned dependencies
         shell: bash
         run: |
           set -euo pipefail
           cd /tmp/heocr-v13-macos
-          python -m pip install --upgrade pip
           python -m pip install --requirement requirements-lock.txt
           python -m pip install --no-deps --editable .
 
@@ -52,4 +71,4 @@ jobs:
             echo 'Unexpected skipped tests on macOS' >&2
             exit 1
           fi
-          echo HEOCR_V13_MACOS_RUNTIME_PASS
+          echo HEOCR_V13_MACOS_RAQM_RUNTIME_PASS
