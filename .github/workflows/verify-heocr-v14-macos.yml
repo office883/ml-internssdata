@@ -1,0 +1,79 @@
+name: Verify Hebrew OCR v14 on macOS
+
+on:
+  push:
+    paths:
+      - '.github/workflows/verify-heocr-v14-macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Clone exact v14 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/heocr-v14-macos
+          git clone --depth 1 --branch heocr-v14-source-verified https://github.com/office883/ml-internssdata.git /tmp/heocr-v14-macos
+          cd /tmp/heocr-v14-macos
+          grep -q 'version = "14.0.0"' pyproject.toml
+          uname -a
+
+      - name: Run the actual one-command macOS setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v14-macos
+          HE_OCR_UNUSED=1 HEOCR_SETUP_ONLY=1 ./RUN_ME.command 2>&1 | tee /tmp/heocr-v14-macos-setup.txt
+          grep -q 'Environment setup and RAQM verification completed' /tmp/heocr-v14-macos-setup.txt
+          grep -q 'WebP round-trip PASS' /tmp/heocr-v14-macos-setup.txt
+
+      - name: Run complete test suite in the launcher environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v14-macos
+          PY="$HOME/.cache/hebrew-ocr-unified-v14/venv/bin/python"
+          test -x "$PY"
+          "$PY" - <<'PY'
+          from io import BytesIO
+          from PIL import Image, ImageDraw, features
+
+          assert features.check_feature('raqm')
+          assert features.version_feature('fribidi')
+          assert features.version_feature('harfbuzz')
+
+          image = Image.new('RGB', (900, 180), 'white')
+          draw = ImageDraw.Draw(image)
+          draw.text((860, 30), 'תכנית קומה 03 — Detail A-104 — 247.35 מ״ר', direction='rtl', fill='black')
+          draw.text((860, 90), 'וְזֹאת הַתּוֹרָה אֲשֶׁר שָׂם מֹשֶׁה׃', direction='rtl', fill='black')
+          out = BytesIO()
+          image.save(out, format='WEBP', lossless=True)
+          out.seek(0)
+          with Image.open(out) as reopened:
+              reopened.load()
+              assert reopened.size == image.size
+          print('MACOS_RAQM_BIDI_NIQQUD_WEBP_PASS')
+          PY
+
+          "$PY" -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+
+          set +e
+          "$PY" -m pytest -q -rs --tb=short > /tmp/heocr-v14-macos-tests.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/heocr-v14-macos-tests.txt
+          test "$rc" -eq 0
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v14-macos-tests.txt
+          if grep -qi 'skipped' /tmp/heocr-v14-macos-tests.txt; then
+            echo 'Unexpected skipped tests on macOS' >&2
+            exit 1
+          fi
+          echo HEOCR_V14_MACOS_RUNTIME_PASS
