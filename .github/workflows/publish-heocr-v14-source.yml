@@ -1,0 +1,298 @@
+name: Publish verified Hebrew OCR v14 source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-heocr-v14-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare exact v14 source from verified v13
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v14-publish
+          rm -rf "$root"
+          git clone --depth 1 --branch heocr-v13-source-verified "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$root/source"
+          cd "$root/source"
+          test "$(git rev-parse 'HEAD^{tree}')" = '1ee1b63cfa8b1c8d68c7f216d513eb9aa1e0e7cb'
+
+          cat > RUN_ME.command <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 022
+
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          cd "$ROOT"
+
+          fail() {
+            printf '\nERROR: %s\n' "$*" >&2
+            exit 1
+          }
+
+          on_error() {
+            local rc=$?
+            printf '\nHebrew OCR builder stopped at line %s while running: %s\n' "${BASH_LINENO[0]:-?}" "${BASH_COMMAND:-?}" >&2
+            exit "$rc"
+          }
+          trap on_error ERR
+
+          note() {
+            printf '\n==> %s\n' "$*"
+          }
+
+          require_command() {
+            command -v "$1" >/dev/null 2>&1 || fail "Required command is missing: $1"
+          }
+
+          PLATFORM="$(uname -s)"
+          VENV="${HEOCR_VENV:-$HOME/.cache/hebrew-ocr-unified-v14/venv}"
+          WORK_DIR="${HEOCR_WORK_DIR:-$HOME/hebrew-ocr-unified-work}"
+          MINIMUM_FREE_GIB="${HEOCR_MINIMUM_FREE_GIB:-200}"
+          TMP_REQUIREMENTS="$(mktemp -t heocr-requirements.XXXXXX)"
+          cleanup() { rm -f "$TMP_REQUIREMENTS"; }
+          trap cleanup EXIT
+
+          if [[ "$PLATFORM" == "Darwin" ]]; then
+            require_command brew
+            note "Installing the pinned macOS native text and image stack"
+            brew install \
+              python@3.12 pkg-config libraqm harfbuzz fribidi freetype \
+              jpeg-turbo libpng libtiff webp openjpeg little-cms2
+            PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
+          else
+            require_command python3.12
+            PYTHON="$(command -v python3.12)"
+          fi
+
+          "$PYTHON" - <<'PY'
+          import sys
+          if sys.version_info[:2] != (3, 12):
+              raise SystemExit(f"Python 3.12 is required, found {sys.version}")
+          PY
+
+          if [[ -x "$VENV/bin/python" ]]; then
+            if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
+          import sys
+          raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)
+          PY
+            then
+              rm -rf "$VENV"
+            fi
+          fi
+
+          if [[ ! -x "$VENV/bin/python" ]]; then
+            note "Creating isolated Python environment at $VENV"
+            "$PYTHON" -m venv "$VENV"
+          fi
+          PY="$VENV/bin/python"
+
+          note "Installing pinned Python dependencies"
+          "$PY" -m pip install --upgrade pip setuptools wheel
+
+          if [[ "$PLATFORM" == "Darwin" ]]; then
+            grep -vE '^[[:space:]]*Pillow==' requirements-lock.txt > "$TMP_REQUIREMENTS"
+            "$PY" -m pip install --requirement "$TMP_REQUIREMENTS"
+
+            prefixes=(libraqm harfbuzz fribidi freetype jpeg-turbo libpng libtiff webp openjpeg little-cms2)
+            pkg_paths=()
+            include_flags=()
+            library_flags=()
+            for formula in "${prefixes[@]}"; do
+              prefix="$(brew --prefix "$formula")"
+              [[ -d "$prefix/lib/pkgconfig" ]] && pkg_paths+=("$prefix/lib/pkgconfig")
+              [[ -d "$prefix/share/pkgconfig" ]] && pkg_paths+=("$prefix/share/pkgconfig")
+              [[ -d "$prefix/include" ]] && include_flags+=("-I$prefix/include")
+              [[ -d "$prefix/lib" ]] && library_flags+=("-L$prefix/lib")
+            done
+            export PKG_CONFIG_PATH="$(IFS=:; echo "${pkg_paths[*]}"):${PKG_CONFIG_PATH:-}"
+            export CPPFLAGS="${include_flags[*]} ${CPPFLAGS:-}"
+            export CFLAGS="${include_flags[*]} ${CFLAGS:-}"
+            export LDFLAGS="${library_flags[*]} ${LDFLAGS:-}"
+
+            if ! "$PY" - <<'PY' >/dev/null 2>&1
+          from PIL import Image, features
+          ok = Image.__version__ == "12.2.0" and features.check_feature("raqm")
+          raise SystemExit(0 if ok else 1)
+          PY
+            then
+              note "Building Pillow 12.2.0 from source with RAQM/HarfBuzz/FriBiDi"
+              "$PY" -m pip uninstall -y Pillow >/dev/null 2>&1 || true
+              "$PY" -m pip install --no-cache-dir --no-binary=Pillow 'Pillow==12.2.0'
+            fi
+          else
+            "$PY" -m pip install --requirement requirements-lock.txt
+          fi
+
+          "$PY" -m pip install --no-deps --editable .
+
+          note "Verifying RTL shaping and image codecs"
+          "$PY" - <<'PY'
+          from io import BytesIO
+          from PIL import Image, features
+
+          assert Image.__version__ == "12.2.0", Image.__version__
+          assert features.check_feature("raqm"), "Pillow lacks RAQM"
+          assert features.version_feature("fribidi"), "FriBiDi is unavailable"
+          assert features.version_feature("harfbuzz"), "HarfBuzz is unavailable"
+
+          buf = BytesIO()
+          Image.new("RGB", (32, 16), "white").save(buf, format="WEBP", lossless=True)
+          buf.seek(0)
+          with Image.open(buf) as image:
+              image.load()
+              assert image.size == (32, 16)
+
+          print("Pillow", Image.__version__)
+          print("RAQM", features.version_feature("raqm"))
+          print("FriBiDi", features.version_feature("fribidi"))
+          print("HarfBuzz", features.version_feature("harfbuzz"))
+          print("WebP round-trip PASS")
+          PY
+
+          if [[ "${HEOCR_SETUP_ONLY:-0}" == "1" ]]; then
+            note "Environment setup and RAQM verification completed"
+            exit 0
+          fi
+
+          note "Checking private Hugging Face write access before the long build"
+          "$PY" -m heocr_unified probe-upload --config "$ROOT/config.json"
+
+          note "Starting resumable full build and verified private upload"
+          mkdir -p "$WORK_DIR"
+          if [[ "$PLATFORM" == "Darwin" ]]; then
+            require_command caffeinate
+            caffeinate -dimsu "$PY" -m heocr_unified run \
+              --config "$ROOT/config.json" \
+              --work-dir "$WORK_DIR" \
+              --minimum-free-gib "$MINIMUM_FREE_GIB"
+          else
+            "$PY" -m heocr_unified run \
+              --config "$ROOT/config.json" \
+              --work-dir "$WORK_DIR" \
+              --minimum-free-gib "$MINIMUM_FREE_GIB"
+          fi
+          BASH
+          chmod +x RUN_ME.command
+
+          cat > MACOS_RUNTIME.md <<'MD'
+          # macOS runtime contract
+
+          `RUN_ME.command` is the supported entry point on Apple Silicon and Intel Macs.
+          It installs the pinned Homebrew native stack, creates an isolated Python 3.12
+          environment, builds Pillow 12.2.0 from source, and refuses to proceed unless
+          RAQM, FriBiDi, HarfBuzz, and WebP all pass runtime checks.
+
+          Before any source dataset is downloaded, the launcher performs a temporary
+          private Hugging Face create/upload/download/delete probe. A read-only or
+          incorrectly scoped token therefore fails immediately rather than after hours
+          of dataset construction.
+
+          Set `HEOCR_SETUP_ONLY=1` only for environment verification. Normal execution is:
+
+          ```bash
+          chmod +x RUN_ME.command
+          ./RUN_ME.command
+          ```
+          MD
+
+          cat > tests/test_macos_launcher_contract.py <<'PY'
+          from pathlib import Path
+
+
+          def test_launcher_builds_pillow_with_native_raqm_before_build():
+              text = Path("RUN_ME.command").read_text(encoding="utf-8")
+              assert "brew install" in text
+              assert "libraqm" in text
+              assert "harfbuzz" in text
+              assert "fribidi" in text
+              assert "--no-binary=Pillow" in text
+              assert 'features.check_feature("raqm")' in text
+              assert "WebP round-trip PASS" in text
+              assert text.index("probe-upload") < text.index("heocr_unified run")
+
+
+          def test_launcher_supports_setup_only_without_weakening_default_path():
+              text = Path("RUN_ME.command").read_text(encoding="utf-8")
+              assert 'HEOCR_SETUP_ONLY:-0' in text
+              assert 'HEOCR_MINIMUM_FREE_GIB:-200' in text
+              assert 'caffeinate -dimsu' in text
+          PY
+
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('pyproject.toml')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('version = "13.0.0"', 'version = "14.0.0"')
+          p.write_text(text, encoding='utf-8')
+          PY
+
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add RUN_ME.command MACOS_RUNTIME.md tests/test_macos_launcher_contract.py pyproject.toml
+          git commit -m 'build: make macOS RAQM setup fail-closed'
+          echo "V14_TREE=$(git rev-parse 'HEAD^{tree}')"
+
+      - name: Run complete Linux clean-room suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v14-publish/source
+          python -m pip install --upgrade pip
+          python -m pip install --requirement "$root/requirements-lock.txt"
+          python -m pip install --no-deps --editable "$root"
+          cd "$root"
+          python -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          python -m pytest -q --disable-warnings | tee /tmp/heocr-v14-publish/PYTEST.txt
+          grep -Eq '[0-9]+ passed' /tmp/heocr-v14-publish/PYTEST.txt
+          if grep -qi 'skipped' /tmp/heocr-v14-publish/PYTEST.txt; then
+            echo 'Unexpected skipped tests in v14 Linux clean-room' >&2
+            exit 1
+          fi
+
+      - name: Publish exact source and deterministic archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v14-publish
+          cd "$root/source"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin 'HEAD:refs/heads/heocr-v14-source-verified'
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v14/ -o "$root/hebrew_ocr_unified_builder_v14.tar.gz" HEAD
+          git archive --format=zip --prefix=hebrew_ocr_unified_builder_v14/ -o "$root/hebrew_ocr_unified_builder_v14.zip" HEAD
+          mkdir -p "$root/evidence"
+          cp "$root/PYTEST.txt" "$root/evidence/"
+          sha256sum "$root/hebrew_ocr_unified_builder_v14.tar.gz" "$root/hebrew_ocr_unified_builder_v14.zip" > "$root/evidence/SHA256SUMS.txt"
+          git rev-parse HEAD > "$root/evidence/SOURCE_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/SOURCE_TREE.txt"
+          tar --list --gzip --file "$root/hebrew_ocr_unified_builder_v14.tar.gz" > "$root/evidence/SOURCE_CONTENTS.txt"
+          echo HEOCR_V14_SOURCE_PUBLISH_PASS
+
+      - name: Upload verified v14 source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v14-source-verified
+          path: |
+            /tmp/heocr-v14-publish/hebrew_ocr_unified_builder_v14.tar.gz
+            /tmp/heocr-v14-publish/hebrew_ocr_unified_builder_v14.zip
+            /tmp/heocr-v14-publish/evidence
+          if-no-files-found: error
+          retention-days: 2
