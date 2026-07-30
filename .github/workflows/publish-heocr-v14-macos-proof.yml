@@ -1,0 +1,130 @@
+name: Publish Hebrew OCR v14 macOS proof
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-heocr-v14-macos-proof.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Clone exact v14 source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/heocr-v14-macos-proof
+          git clone --depth 1 --branch heocr-v14-source-verified "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/heocr-v14-macos-proof
+          cd /tmp/heocr-v14-macos-proof
+          grep -q 'version = "14.0.0"' pyproject.toml
+          git rev-parse HEAD > /tmp/v14-source-commit.txt
+          git rev-parse 'HEAD^{tree}' > /tmp/v14-source-tree.txt
+
+      - name: Run supported launcher in setup-only mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v14-macos-proof
+          HEOCR_SETUP_ONLY=1 ./RUN_ME.command 2>&1 | tee /tmp/v14-setup.log
+          grep -q 'Environment setup and RAQM verification completed' /tmp/v14-setup.log
+          grep -q 'WebP round-trip PASS' /tmp/v14-setup.log
+
+      - name: Verify rendering and all tests without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v14-macos-proof
+          PY="$HOME/.cache/hebrew-ocr-unified-v14/venv/bin/python"
+          test -x "$PY"
+
+          "$PY" - <<'PY' | tee /tmp/v14-native-features.txt
+          from io import BytesIO
+          from PIL import Image, ImageDraw, features
+          print('PILLOW', Image.__version__)
+          print('RAQM', features.check_feature('raqm'), features.version_feature('raqm'))
+          print('FRIBIDI', features.version_feature('fribidi'))
+          print('HARFBUZZ', features.version_feature('harfbuzz'))
+          assert Image.__version__ == '12.2.0'
+          assert features.check_feature('raqm')
+          assert features.version_feature('fribidi')
+          assert features.version_feature('harfbuzz')
+          image = Image.new('RGB', (1000, 220), 'white')
+          draw = ImageDraw.Draw(image)
+          draw.text((960, 30), 'תכנית קומה 03 — Detail A-104 — 247.35 מ״ר', direction='rtl', fill='black')
+          draw.text((960, 110), 'וְזֹאת הַתּוֹרָה אֲשֶׁר שָׂם מֹשֶׁה׃', direction='rtl', fill='black')
+          payload = BytesIO()
+          image.save(payload, format='WEBP', lossless=True)
+          payload.seek(0)
+          with Image.open(payload) as reopened:
+              reopened.load()
+              assert reopened.size == image.size
+          print('MACOS_RAQM_BIDI_NIQQUD_WEBP_PASS')
+          PY
+
+          "$PY" -m compileall -q heocr_unified tests
+          bash -n RUN_ME.command
+          git diff --check
+          "$PY" -m pytest -q -rs --tb=short | tee /tmp/v14-pytest.txt
+          grep -Eq '[0-9]+ passed' /tmp/v14-pytest.txt
+          if grep -qi 'skipped' /tmp/v14-pytest.txt; then
+            echo 'Unexpected skipped tests on macOS' >&2
+            exit 1
+          fi
+
+      - name: Publish cryptographic macOS proof branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/heocr-v14-macos-proof
+          PY="$HOME/.cache/hebrew-ocr-unified-v14/venv/bin/python"
+          "$PY" - <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import platform
+          import re
+          import subprocess
+          from pathlib import Path
+          from PIL import Image, features
+
+          tests = Path('/tmp/v14-pytest.txt').read_text(encoding='utf-8')
+          match = re.search(r'(\d+) passed', tests)
+          assert match, tests[-1000:]
+          proof = {
+              'status': 'PASS',
+              'platform': platform.platform(),
+              'machine': platform.machine(),
+              'python': platform.python_version(),
+              'source_commit': Path('/tmp/v14-source-commit.txt').read_text().strip(),
+              'source_tree': Path('/tmp/v14-source-tree.txt').read_text().strip(),
+              'pillow': Image.__version__,
+              'raqm': features.version_feature('raqm'),
+              'fribidi': features.version_feature('fribidi'),
+              'harfbuzz': features.version_feature('harfbuzz'),
+              'webp_roundtrip': 'PASS',
+              'pytest_passed': int(match.group(1)),
+              'pytest_skipped': 0,
+              'launcher_sha256': hashlib.sha256(Path('RUN_ME.command').read_bytes()).hexdigest(),
+          }
+          Path('MACOS_VERIFICATION.json').write_text(
+              json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(proof, sort_keys=True))
+          PY
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add MACOS_VERIFICATION.json
+          git commit -m 'test: record verified macOS ARM64 runtime'
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin 'HEAD:refs/heads/heocr-v14-macos-verified'
+          echo HEOCR_V14_MACOS_PROOF_PASS
