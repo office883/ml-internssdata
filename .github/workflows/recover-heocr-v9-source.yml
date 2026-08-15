@@ -1,0 +1,121 @@
+name: Recover Hebrew OCR v9 source
+
+on:
+  pull_request:
+    paths:
+      - 'tmp/heocr-v11-recover-trigger/**'
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    env:
+      V6_REF: tmp/heocr-v6-cleanroom-20260726
+      V6_ARCHIVE_SHA256: 729850c47fc40f7fdcd1c78ad13f060b1b488c682dc990b40ce9c5b1414ce6d0
+      V6_ARCHIVE_BYTES: '55107'
+      V6_TREE_SHA: 9aeeaaacae90906e7ed1f1a85817862db9751dd4
+      V9_REF: tmp/heocr-v9-patch-20260726
+      V9_PATCH_GZ_SHA256: 30e76c7a0ff7b9e72faec94223ab3151a70cff50595834120c8d114a3cd66acc
+      V9_PATCH_SHA256: 200b51a2aafac7988b67c797fedb10dfd441a89e6c312dd3f91b3378489f9d2a
+      V9_TREE_SHA: 4cb1de7bcf997060581ed3093dcd89ad25f71cc7
+    steps:
+      - name: Reconstruct, verify, and archive source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root=/tmp/heocr-v9-recovery
+          rm -rf "$root"
+          mkdir -p "$root/v6-parts" "$root/v9-parts" "$root/source"
+
+          fetch_content() {
+            local ref="$1" path="$2" out="$3"
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${ref}" \
+              --jq '.content' \
+              | tr -d '\n' \
+              | base64 --decode > "$out"
+          }
+
+          for i in 000 001 002 003 004 005 006; do
+            fetch_content "$V6_REF" "tmp/heocr-v6-cleanroom/part-${i}.b64" "$root/v6-parts/part-${i}.b64"
+          done
+
+          python3 - <<'PY'
+          from __future__ import annotations
+          import base64, hashlib, os
+          from pathlib import Path
+          root = Path('/tmp/heocr-v9-recovery')
+          compact = b''.join(b''.join(p.read_bytes().split()) for p in sorted((root/'v6-parts').glob('part-*.b64')))
+          archive = base64.b64decode(compact, validate=True)
+          assert len(archive) == int(os.environ['V6_ARCHIVE_BYTES'])
+          assert hashlib.sha256(archive).hexdigest() == os.environ['V6_ARCHIVE_SHA256']
+          (root/'v6-source.tar.gz').write_bytes(archive)
+          PY
+          gzip --test "$root/v6-source.tar.gz"
+          tar --extract --gzip --file "$root/v6-source.tar.gz" --directory "$root/source"
+
+          declare -a names=(part-000.b64 part-001.b64 part-002.b64 part-003.b64 part-004.b64 part-005.b64 part-006.b64 part-007.b64)
+          declare -a sizes=(8000 8000 8000 8000 8000 8000 8000 4244)
+          declare -a hashes=(
+            b5049465893c238eac1ef792a049cbdf3c2cdf45c1fe8bdf4065f58a8cc98025
+            7d886b3c430450061d72f50b765a0a51705b0756617c576fa126e3d743379c83
+            3a8468120176b04b1e245116f866638f256e718cd48c50d189a3a590a26bae37
+            83abe139445c1b7763c84412b543f44826a85ba5f55d9d355eb15983e41578d7
+            64d19ae7197ca38ea3a362d417323eb9b92d4b5048fe140857ed5b6131d66cf7
+            1799350fdc590e02cd35cea3f4e653b8c4b544ae4ad9c80e606ab059708be916
+            11f71807902855ddf7a24315cdabacb938d25d3c9d238f5971645bb9b07f1a2d
+            76c6c92e40f9e353b849bcfd39b72c544f4f9a89eba4db5f0cf88ca828bf0c8b
+          )
+          for idx in "${!names[@]}"; do
+            name="${names[$idx]}"
+            fetch_content "$V9_REF" "tmp/heocr-v9-patch/${name}" "$root/v9-parts/${name}"
+            test "$(wc -c < "$root/v9-parts/${name}")" -eq "${sizes[$idx]}"
+            echo "${hashes[$idx]}  $root/v9-parts/${name}" | sha256sum --check --status
+          done
+
+          cat "$root"/v9-parts/part-*.b64 | tr -d '\n\r\t ' | base64 --decode > "$root/v6-to-v9.patch.gz"
+          echo "$V9_PATCH_GZ_SHA256  $root/v6-to-v9.patch.gz" | sha256sum --check --status
+          gzip --test "$root/v6-to-v9.patch.gz"
+          gzip --decompress --stdout "$root/v6-to-v9.patch.gz" > "$root/v6-to-v9.patch"
+          echo "$V9_PATCH_SHA256  $root/v6-to-v9.patch" | sha256sum --check --status
+
+          cd "$root/source"
+          rm -rf .git __pycache__ heocr_unified/__pycache__ tests/__pycache__
+          git init
+          git config user.name OpenAI
+          git config user.email oai@example.invalid
+          git add -A
+          git commit -m baseline
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V6_TREE_SHA"
+          git am "$root/v6-to-v9.patch"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$V9_TREE_SHA"
+
+          python3 -m compileall -q heocr_unified tests
+          git archive --format=tar.gz --prefix=hebrew_ocr_unified_builder_v9/ -o "$root/hebrew_ocr_unified_builder_v9.tar.gz" HEAD
+          sha256sum "$root/hebrew_ocr_unified_builder_v9.tar.gz" > "$root/SOURCE_ARCHIVE.sha256"
+          git rev-parse HEAD > "$root/SOURCE_COMMIT.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/SOURCE_TREE.txt"
+          tar --list --gzip --file "$root/hebrew_ocr_unified_builder_v9.tar.gz" > "$root/SOURCE_CONTENTS.txt"
+          find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > "$root/EXTRACTED_FILES.sha256"
+          echo "RECOVERED_COMMIT=$(cat "$root/SOURCE_COMMIT.txt")"
+          echo "RECOVERED_TREE=$(cat "$root/SOURCE_TREE.txt")"
+          cat "$root/SOURCE_ARCHIVE.sha256"
+
+      - name: Upload verified source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heocr-v9-source-verified
+          path: |
+            /tmp/heocr-v9-recovery/hebrew_ocr_unified_builder_v9.tar.gz
+            /tmp/heocr-v9-recovery/SOURCE_ARCHIVE.sha256
+            /tmp/heocr-v9-recovery/SOURCE_COMMIT.txt
+            /tmp/heocr-v9-recovery/SOURCE_TREE.txt
+            /tmp/heocr-v9-recovery/SOURCE_CONTENTS.txt
+            /tmp/heocr-v9-recovery/EXTRACTED_FILES.sha256
+          if-no-files-found: error
+          retention-days: 1
